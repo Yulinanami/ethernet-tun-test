@@ -206,7 +206,7 @@ namespace Qv2ray::components::proxy {
         }
         if (ERROR_SUCCESS != ret) {
             LOG("Failed to list entry names");
-            return false;
+            count = 0;
         }
 
         // Set proxy for each connectoid.
