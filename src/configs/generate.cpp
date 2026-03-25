@@ -844,7 +844,7 @@ namespace Configs {
         route["default_domain_resolver"] = QJsonObject{
                                 {"server", "dns-direct"},
                                 {"strategy", Configs::dataManager->settingsRepo->default_domain_strategy}};
-        if (Configs::dataManager->settingsRepo->spmode_vpn) route["auto_detect_interface"] = true;
+        route["auto_detect_interface"] = true;
 
         ctx->buildConfigResult->coreConfig["route"] = route;
     }
