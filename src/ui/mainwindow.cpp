@@ -545,6 +545,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     connect(tray, &QSystemTrayIcon::activated, qApp, [=, this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger) {
             ActivateWindow(this);
+            refresh_proxy_list_column_size();
         }
     });
 
@@ -1631,7 +1632,7 @@ void MainWindow::refresh_status(const QString &traffic_update) {
     }
 
     if (QDateTime::currentSecsSinceEpoch() - last_test_time > 2) {
-        ui->label_running->setText(running ? QString("[%1] %2").arg(group_name, running->outbound->DisplayName()).left(30) : tr("Not Running"));
+        ui->label_running->setText(running ? QString("[%1]\n%2").arg(group_name, running->outbound->DisplayName()) : tr("Not Running"));
     }
     //
     auto display_socks = DisplayAddress(Configs::dataManager->settingsRepo->inbound_address, Configs::dataManager->settingsRepo->inbound_socks_port);
@@ -1788,7 +1789,6 @@ void MainWindow::refresh_proxy_list_column_size() {
             }
             ui->profilesTableView->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         }
-        for (int i=0;i<=4;i++) ui->profilesTableView->setColumnWidth(i, hHeader->sectionSize(i));
         hHeader->adjustPositions();
         hHeader->blockSignals(false);
     });
