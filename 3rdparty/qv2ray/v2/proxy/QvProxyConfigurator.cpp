@@ -267,6 +267,15 @@ namespace Qv2ray::components::proxy {
             LOG("Failed to set proxy.");
         }
 
+        // Write registry directly to ensure proxy works on PPPoE/RAS connections
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            DWORD proxyEnable = 1;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE *)&proxyEnable, sizeof(proxyEnable));
+            RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE *)proxyStrW, (DWORD)((wcslen(proxyStrW) + 1) * sizeof(WCHAR)));
+            RegCloseKey(hKey);
+        }
+
         __QueryProxyOptions();
 #elif defined(Q_OS_LINUX)
         QList<ProcessArgument> actions;
@@ -384,6 +393,14 @@ namespace Qv2ray::components::proxy {
 #ifdef Q_OS_WIN
         if (!__SetProxyOptions(nullptr, false)) {
             LOG("Failed to clear proxy.");
+        }
+
+        // Clear registry to match
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            DWORD proxyEnable = 0;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE *)&proxyEnable, sizeof(proxyEnable));
+            RegCloseKey(hKey);
         }
 #elif defined(Q_OS_LINUX)
         QList<ProcessArgument> actions;

@@ -552,7 +552,6 @@ namespace Configs {
             if (Configs::dataManager->settingsRepo->vpn_ipv6) tunAddress += tunIPv6CIDR;
             inboundObj["address"] = tunAddress;
 
-            // Keep loopback traffic out of tun so local listeners like dns-in do not get recaptured.
             QJsonArray routeExcludeAddrs = {"127.0.0.0/8"};
             QJsonArray routeExcludeSets;
             if (Configs::dataManager->settingsRepo->enable_tun_routing)
