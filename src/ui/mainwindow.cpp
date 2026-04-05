@@ -348,7 +348,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
                 });
                 return;
             }
-            Configs::dataManager->groupsRepo->Save(Configs::dataManager->groupsRepo->CurrentGroup());
+            Configs::dataManager->groupsRepo->Save(currGroup);
             runOnUiThread([=, this] {
                 refresh_proxy_list({}, true);
             });
@@ -427,7 +427,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
             Configs::dataManager->groupsRepo->Save(group);
             GroupSortAction action;
             action.method = GroupSortMethod::ByTestResult;
-            action.descending = false;
+            action.descending = true;
             runOnNewThread([=, this] {
                 auto currGroup = Configs::dataManager->groupsRepo->CurrentGroup();
                 if (currGroup == nullptr) return;
@@ -437,9 +437,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
                         });
                     return;
                 }
-                Configs::dataManager->groupsRepo->Save(Configs::dataManager->groupsRepo->CurrentGroup());
+                Configs::dataManager->groupsRepo->Save(currGroup);
                 runOnUiThread([=, this] {
-                    refresh_proxy_list();
+                    refresh_proxy_list({}, true);
                     });
                 });
             return;
@@ -535,15 +535,91 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     trayMenu->addAction(ui->actionRemember_last_proxy);
     trayMenu->addAction(ui->actionAllow_LAN);
     trayMenu->addSeparator();
-    trayMenu->addMenu(ui->menu_spmode);
+    // Select Server submenu (dynamically populated with pagination)
+    constexpr int PAGE_SIZE = 15;
+    trayServerMenu = new QMenu(tr("Select Server"));
+    trayMenu->addMenu(trayServerMenu);
+    connect(trayServerMenu, &QMenu::aboutToShow, this, [=, this]() {
+        trayServerMenu->clear();
+        // Stop action if a profile is running
+        if (running) {
+            auto *stopAction = trayServerMenu->addAction(tr("Stop: %1").arg(running->name));
+            connect(stopAction, &QAction::triggered, this, [=, this]() { profile_stop(false, false, true); });
+            trayServerMenu->addSeparator();
+        }
+        // Build flat list of profiles, starting from the group of the running profile or currentGroup
+        int startGroupId = Configs::dataManager->settingsRepo->current_group;
+        if (running) startGroupId = running->gid;
+        auto groupIds = Configs::dataManager->groupsRepo->GetGroupsTabOrder();
+        // Reorder groupIds so startGroupId comes first
+        int startIdx = groupIds.indexOf(startGroupId);
+        if (startIdx > 0) {
+            QList<int> reordered = groupIds.mid(startIdx) + groupIds.mid(0, startIdx);
+            groupIds = reordered;
+        }
+        QList<int> allProfileIDs;
+        for (auto gid : groupIds) {
+            auto group = Configs::dataManager->groupsRepo->GetGroup(gid);
+            allProfileIDs.append(group->Profiles());
+        }
+        int totalProfiles = allProfileIDs.size();
+        // Clamp page
+        int maxPage = qMax(0, (totalProfiles - 1) / PAGE_SIZE);
+        trayServerPage = qBound(0, trayServerPage, maxPage);
+        int offset = trayServerPage * PAGE_SIZE;
+        int end = qMin(offset + PAGE_SIZE, totalProfiles);
+        // Show ↑ if not on first page
+        if (trayServerPage > 0) {
+            auto *upAction = trayServerMenu->addAction(QStringLiteral("\u2191"));
+            connect(upAction, &QAction::triggered, this, [=, this]() {
+                trayServerPage--;
+                trayServerMenu->popup(trayServerMenu->pos());
+            });
+        }
+        // Show profiles for current page
+        auto neededProfilesIDNames = Configs::dataManager->profilesRepo->GetProfileIDNameMappedBatch(allProfileIDs.sliced(offset, end - offset));
+        for (const auto&[id, name] : neededProfilesIDNames) {
+            auto *action = trayServerMenu->addAction(name);
+            action->setCheckable(true);
+            action->setChecked(running && running->id == id);
+            connect(action, &QAction::triggered, this, [=, this]() { profile_start(id); });
+        }
+        // Show ↓ if not on last page
+        if (trayServerPage < maxPage) {
+            auto *downAction = trayServerMenu->addAction(QStringLiteral("\u2193"));
+            connect(downAction, &QAction::triggered, this, [=, this]() {
+                trayServerPage++;
+                trayServerMenu->popup(trayServerMenu->pos());
+            });
+        }
+    });
+    trayMenu->addSeparator();
+    // MacOS cannot reuse menus across different parents properly
+    if (getOS() == Darwin) {
+        auto* traySpmodeMenu = new QMenu(ui->menu_spmode->title(), trayMenu);
+        traySpmodeMenu->addAction(ui->menu_spmode_system_proxy);
+        traySpmodeMenu->addAction(ui->menu_spmode_vpn);
+        traySpmodeMenu->addAction(ui->menu_spmode_disabled);
+        connect(traySpmodeMenu, &QMenu::aboutToShow, this, [=,this]() {
+            ui->menu_spmode_disabled->setChecked(!(Configs::dataManager->settingsRepo->spmode_system_proxy || Configs::dataManager->settingsRepo->spmode_vpn));
+            ui->menu_spmode_system_proxy->setChecked(Configs::dataManager->settingsRepo->spmode_system_proxy);
+            ui->menu_spmode_vpn->setChecked(Configs::dataManager->settingsRepo->spmode_vpn);
+        });
+        trayMenu->addMenu(traySpmodeMenu);
+    } else {
+        trayMenu->addMenu(ui->menu_spmode);
+    }
     trayMenu->addSeparator();
     trayMenu->addAction(ui->actionRestart_Proxy);
     trayMenu->addAction(ui->actionRestart_Program);
     trayMenu->addAction(ui->menu_exit);
     tray->setVisible(!Configs::dataManager->settingsRepo->disable_tray);
     tray->setContextMenu(trayMenu);
+    connect(trayMenu, &QMenu::aboutToShow, this, [=,this]() {
+       trayServerPage = 0;
+    });
     connect(tray, &QSystemTrayIcon::activated, qApp, [=, this](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::Trigger) {
+        if (reason == QSystemTrayIcon::Trigger && getOS() != Darwin) {
             ActivateWindow(this);
             refresh_proxy_list_column_size();
         }
@@ -747,6 +823,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
             ui->menuRouting_Menu->addAction(action);
         }
     });
+    connect(ui->actionClear_Test_Result, &QAction::triggered, this, [=, this]() {
+        auto entIDs = get_now_selected_list();
+        auto ents = Configs::dataManager->profilesRepo->GetProfileBatch(entIDs);
+        if (ents.empty()) return;
+        for (const auto &ent: ents) {
+            ent->ClearTestResults();
+        }
+        Configs::dataManager->profilesRepo->SaveBatch(ents);
+        if (auto group = Configs::dataManager->groupsRepo->GetGroup(ents.first()->gid); group &&
+            group->calculated_column_width.size() > 3) group->calculated_column_width[3] = 0;
+        refresh_proxy_list();
+    });
     connect(ui->actionUrl_Test_Selected, &QAction::triggered, this, [=,this]() {
         urltest_current_group(get_now_selected_list());
     });
@@ -796,6 +884,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         auto profile = Configs::dataManager->profilesRepo->GetProfile(selected.first());
         if (!profile) return;
 
+        if (selected.count() == 1 && profile->DisplayTestResult().trimmed().isEmpty()) {
+            ui->actionCopy_Test_Result->setVisible(false);
+        } else {
+            ui->actionCopy_Test_Result->setVisible(true);
+        }
+
         ui->menu_export_config->setVisible(true);
         if (profile->outbound->IsXray()) ui->actionExport_Xray_config->setVisible(true);
     });
@@ -830,6 +924,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
             config_core = QJsonObject2QString(res->xrayConfig, true);
             QApplication::clipboard()->setText(config_core);
         }
+    });
+    connect(ui->actionCopy_Test_Result, &QAction::triggered, this, [=,this]() {
+        auto ents = get_now_selected_list();
+        if (ents.count() == 0 || ents.count() > 1000) return;
+        auto entList = Configs::dataManager->profilesRepo->GetProfileBatch(ents);
+        QString res;
+        int counter = 0;
+        for (auto ent : entList) {
+            auto testRes = ent->DisplayTestResult();
+            if (!testRes.trimmed().isEmpty()) {
+                res += testRes.trimmed() + "\n";
+                counter++;
+            }
+        }
+        QApplication::clipboard()->setText(res);
+        MW_show_log(QString::number(counter) + tr(" Test result(s) copied to clipboard!"));
     });
     connect(ui->actionAdd_profile_from_File, &QAction::triggered, this, [=,this]()
     {
@@ -2696,6 +2806,8 @@ void MainWindow::setActionsData()
     ui->actionRefresh_Column_Widths->setData(QString("m25"));
     ui->actionResolve_Out_IP->setData(QString("m26"));
     ui->actionResolve_Selected_Out_IP->setData(QString("m27"));
+    ui->actionCopy_Test_Result->setData(QString("m28"));
+    ui->actionClear_Test_Result->setData(QString("m29"));
 }
 
 QList<QAction*> MainWindow::getActionsForShortcut()

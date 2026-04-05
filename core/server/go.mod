@@ -7,8 +7,8 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
-	github.com/sagernet/sing v0.8.3-0.20260315153529-ed51f65fbfde
-	github.com/sagernet/sing-box v1.13.4
+	github.com/sagernet/sing v0.8.3
+	github.com/sagernet/sing-box v1.13.5
 	github.com/sagernet/sing-tun v0.8.6
 	github.com/spf13/cobra v1.10.2
 	github.com/xtls/xray-core v1.251208.0
@@ -36,7 +36,7 @@ require (
 	github.com/database64128/tfo-go/v2 v2.3.2 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/dgryski/go-metro v0.0.0-20200812162917-85c65e2d0165 // indirect
-	github.com/dyhkwong/sing-juicity v0.1.1 // indirect
+	github.com/dyhkwong/sing-juicity v0.1.2 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.0.2 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
@@ -125,7 +125,7 @@ require (
 	github.com/sagernet/nftables v0.3.0-beta.4 // indirect
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4 // indirect
 	github.com/sagernet/sing-mux v0.3.4 // indirect
-	github.com/sagernet/sing-quic v0.6.0 // indirect
+	github.com/sagernet/sing-quic v0.6.1 // indirect
 	github.com/sagernet/sing-shadowsocks v0.2.8 // indirect
 	github.com/sagernet/sing-shadowsocks2 v0.2.1 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11 // indirect
@@ -178,7 +178,7 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/sagernet/sing-box => github.com/Throneproj/sing-box v1.11.16-0.20260326082454-f68920b4b554
+replace github.com/sagernet/sing-box => github.com/Throneproj/sing-box v1.11.16-0.20260331193727-c21e813ab835
 
 replace github.com/sagernet/cronet-go => github.com/parhelia512/cronet-go v0.0.0-20260329114135-f2495ade5da7
 
