@@ -2,25 +2,46 @@ name: Quick Windows Test Build
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Optional label for the test build"
-        required: false
 
 jobs:
   build-go:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    outputs:
+      upstream_sha: ${{ steps.meta.outputs.sha }}
+      upstream_short_sha: ${{ steps.meta.outputs.short_sha }}
+      core_artifact_name: ${{ steps.names.outputs.core_artifact_name }}
+      app_artifact_name: ${{ steps.names.outputs.app_artifact_name }}
     steps:
-      - name: Checkout
+      - name: Checkout upstream Throne
         uses: actions/checkout@v4.2.2
+        with:
+          repository: throneproj/Throne
+          ref: main
+          submodules: recursive
+
+      - name: Capture upstream revision
+        id: meta
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compose artifact names
+        id: names
+        shell: bash
+        run: |
+          echo "core_artifact_name=Quick-${{ steps.meta.outputs.short_sha }}-Common-windows-amd64" >> "$GITHUB_OUTPUT"
+          echo "app_artifact_name=Quick-${{ steps.meta.outputs.short_sha }}-windows64-runnable" >> "$GITHUB_OUTPUT"
+
       - name: Cache Core Artifact
         id: cache-common
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/*') }}-1.25.8
+          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/**') }}-1.25.8
+
       - name: Setup Go
         if: steps.cache-common.outputs.cache-hit != 'true'
         uses: actions/setup-go@v5.5.0
@@ -28,30 +49,49 @@ jobs:
           go-version: "1.25.8"
           cache-dependency-path: |
             core/server/go.sum
+
       - name: Install Protoc
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: |
           curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-linux-x86_64.zip"
           unzip "protoc-31.1-linux-x86_64.zip" -d protoc_install
           cp ./protoc_install/bin/protoc /usr/local/bin
+
       - name: Install protoc plugins
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: |
           go install github.com/golang/protobuf/protoc-gen-go@latest
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
       - name: Build Go Core
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          DEST: deployment/windows64
         run: |
           GOOS=windows GOARCH=amd64 ./script/build_go.sh
+
       - name: Archive Core Artifact
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: tar czvf artifacts.tgz ./deployment
+
       - name: Upload Core Artifact
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: Quick-${{ github.sha }}-Common-windows-amd64
+          name: ${{ steps.names.outputs.core_artifact_name }}
           path: artifacts.tgz
+
+      - name: Write summary
+        shell: bash
+        run: |
+          {
+            echo "### Upstream source"
+            echo ""
+            echo "- Repository: \`throneproj/Throne\`"
+            echo "- Requested ref: \`main\`"
+            echo "- Resolved commit: \`${{ steps.meta.outputs.sha }}\`"
+            echo "- Core artifact: \`${{ steps.names.outputs.core_artifact_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-windows:
     permissions:
@@ -60,18 +100,23 @@ jobs:
       - build-go
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout upstream Throne
         uses: actions/checkout@v4.2.2
         with:
+          repository: throneproj/Throne
+          ref: ${{ needs.build-go.outputs.upstream_sha }}
           submodules: recursive
+
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: x64
+
       - name: Setup Go
         uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.25.8"
+
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.0
         with:
@@ -79,10 +124,13 @@ jobs:
           setup-python: true
           cache: true
           cache-key-prefix: QuickQtCache-windows-latest-x86_64
+
       - name: Download Core Artifact
         uses: actions/download-artifact@v4.3.0
         with:
+          name: ${{ needs.build-go.outputs.core_artifact_name }}
           path: download-artifact
+
       - name: Build App
         shell: bash
         run: |
@@ -91,8 +139,15 @@ jobs:
           curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
           cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
           ninja
-          cd ..
+
+      - name: Assemble app bundle
+        shell: bash
+        env:
+          DEST: deployment/windows64
+          DEST_SUFFIX: Common-windows-amd64
+        run: |
           ./script/deploy_windows.sh
+
       - name: Deploy Qt Runtime
         shell: cmd
         run: |
@@ -104,6 +159,7 @@ jobs:
           if not exist Qt6Gui.dll exit /b 1
           if not exist platforms\qwindows.dll exit /b 1
           popd
+
       - name: Pack Runnable Zip
         shell: powershell
         run: |
@@ -114,8 +170,19 @@ jobs:
             Remove-Item deployment\Throne-windows64-runnable.zip -Force
           }
           Compress-Archive -Path deployment\windows64\* -DestinationPath deployment\Throne-windows64-runnable.zip
+
       - name: Upload Runnable Zip
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: Quick-${{ github.sha }}-windows64-runnable
+          name: ${{ needs.build-go.outputs.app_artifact_name }}
           path: deployment/Throne-windows64-runnable.zip
+
+      - name: Write summary
+        shell: bash
+        run: |
+          {
+            echo ""
+            echo "### Runnable package"
+            echo ""
+            echo "- Artifact: \`${{ needs.build-go.outputs.app_artifact_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
