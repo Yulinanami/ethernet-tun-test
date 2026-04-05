@@ -12,6 +12,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    env:
+      DEST: ${{ github.workspace }}/deployment/windows-amd64
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -65,20 +67,9 @@ jobs:
         with:
           submodules: recursive
       - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1.13.0
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Setup Go
-        uses: actions/setup-go@v5.5.0
-        with:
-          go-version: "1.25.8"
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4.3.0
-        with:
-          version: "6.10.2"
-          setup-python: true
-          cache: true
-          cache-key-prefix: QuickQtCache-windows-latest-x86_64
       - name: Download Core Artifact
         uses: actions/download-artifact@v4.3.0
         with:
@@ -86,18 +77,28 @@ jobs:
       - name: Build App
         shell: bash
         run: |
+          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.0/Qt_6.11.0_x64.7z
+          7z x qt.7z
+          curl -L -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_x64.7z
+          7z x openssl.7z
+          export CMAKE_PREFIX_PATH=$PWD/Qt/lib/cmake
+          export OPENSSL_ROOT_DIR=$PWD/openssl
           mkdir build
           cd build
           curl -fLso srslist.h "https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h"
-          cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
+          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
           ninja
           cd ..
           ./script/deploy_windows.sh
+        env:
+          DEST: ${{ github.workspace }}/deployment/windows-amd64
+          DEST_SUFFIX: windows-amd64
       - name: Deploy Qt Runtime
         shell: cmd
         run: |
+          set PATH=%CD%\Qt\bin;%PATH%
           where windeployqt
-          pushd deployment\windows64
+          pushd deployment\windows-amd64
           windeployqt --release Throne.exe --no-translations --no-system-d3d-compiler --no-opengl-sw --no-svg --verbose 2
           if not exist Qt6Widgets.dll exit /b 1
           if not exist Qt6Core.dll exit /b 1
@@ -107,15 +108,15 @@ jobs:
       - name: Pack Runnable Zip
         shell: powershell
         run: |
-          if (Test-Path deployment\windows64\Throne.pdb) {
-            Remove-Item deployment\windows64\Throne.pdb -Force
+          if (Test-Path deployment\windows-amd64\Throne.pdb) {
+            Remove-Item deployment\windows-amd64\Throne.pdb -Force
           }
-          if (Test-Path deployment\Throne-windows64-runnable.zip) {
-            Remove-Item deployment\Throne-windows64-runnable.zip -Force
+          if (Test-Path deployment\Throne-windows-amd64-runnable.zip) {
+            Remove-Item deployment\Throne-windows-amd64-runnable.zip -Force
           }
-          Compress-Archive -Path deployment\windows64\* -DestinationPath deployment\Throne-windows64-runnable.zip
+          Compress-Archive -Path deployment\windows-amd64\* -DestinationPath deployment\Throne-windows-amd64-runnable.zip
       - name: Upload Runnable Zip
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: Quick-${{ github.sha }}-windows64-runnable
-          path: deployment/Throne-windows64-runnable.zip
+          name: Quick-${{ github.sha }}-windows-amd64-runnable
+          path: deployment/Throne-windows-amd64-runnable.zip
