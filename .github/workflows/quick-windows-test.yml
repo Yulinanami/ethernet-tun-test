@@ -93,18 +93,6 @@ jobs:
         env:
           DEST: ${{ github.workspace }}/deployment/windows-amd64
           DEST_SUFFIX: windows-amd64
-      - name: Deploy Qt Runtime
-        shell: cmd
-        run: |
-          set PATH=%CD%\Qt\bin;%PATH%
-          where windeployqt
-          pushd deployment\windows-amd64
-          windeployqt --release Throne.exe --no-translations --no-system-d3d-compiler --no-opengl-sw --verbose 2
-          if not exist Qt6Widgets.dll exit /b 1
-          if not exist Qt6Core.dll exit /b 1
-          if not exist Qt6Gui.dll exit /b 1
-          if not exist platforms\qwindows.dll exit /b 1
-          popd
       - name: Pack Runnable Zip
         shell: powershell
         run: |
