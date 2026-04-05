@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/*') }}-1.25.8
+          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/**') }}-1.25.8
       - name: Setup Go
         if: steps.cache-common.outputs.cache-hit != 'true'
         uses: actions/setup-go@v5.5.0
@@ -93,16 +93,15 @@ jobs:
         env:
           DEST: ${{ github.workspace }}/deployment/windows-amd64
           DEST_SUFFIX: windows-amd64
+      - name: Verify Deployment Contents
+        shell: bash
+        run: ls -la deployment/windows-amd64/
       - name: Pack Runnable Zip
-        shell: powershell
+        shell: bash
         run: |
-          if (Test-Path deployment\windows-amd64\Throne.pdb) {
-            Remove-Item deployment\windows-amd64\Throne.pdb -Force
-          }
-          if (Test-Path deployment\Throne-windows-amd64-runnable.zip) {
-            Remove-Item deployment\Throne-windows-amd64-runnable.zip -Force
-          }
-          Compress-Archive -Path deployment\windows-amd64\* -DestinationPath deployment\Throne-windows-amd64-runnable.zip
+          rm -f deployment/windows-amd64/Throne.pdb
+          cd deployment/windows-amd64
+          7z a -mx9 ../Throne-windows-amd64-runnable.zip .
       - name: Upload Runnable Zip
         uses: actions/upload-artifact@v4.6.2
         with:
