@@ -2,6 +2,8 @@
 
 #include <QAbstractItemView>
 #include <QMenu>
+#include <ranges>
+
 #include "include/configs/sub/GroupUpdater.hpp"
 #include "include/sys/Process.hpp"
 #include "include/sys/AutoRun.hpp"
@@ -536,7 +538,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     trayMenu->addAction(ui->actionAllow_LAN);
     trayMenu->addSeparator();
     // Select Server submenu (dynamically populated with pagination)
-    constexpr int PAGE_SIZE = 15;
+    constexpr int PAGE_CAPACITY = 15;
     trayServerMenu = new QMenu(tr("Select Server"));
     trayMenu->addMenu(trayServerMenu);
     connect(trayServerMenu, &QMenu::aboutToShow, this, [=, this]() {
@@ -564,10 +566,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         }
         int totalProfiles = allProfileIDs.size();
         // Clamp page
-        int maxPage = qMax(0, (totalProfiles - 1) / PAGE_SIZE);
+        int maxPage = qMax(0, (totalProfiles - 1) / PAGE_CAPACITY);
         trayServerPage = qBound(0, trayServerPage, maxPage);
-        int offset = trayServerPage * PAGE_SIZE;
-        int end = qMin(offset + PAGE_SIZE, totalProfiles);
+        int offset = trayServerPage * PAGE_CAPACITY;
+        int end = qMin(offset + PAGE_CAPACITY, totalProfiles);
         // Show ↑ if not on first page
         if (trayServerPage > 0) {
             auto *upAction = trayServerMenu->addAction(QStringLiteral("\u2191"));
@@ -891,7 +893,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         }
 
         ui->menu_export_config->setVisible(true);
-        if (profile->outbound->IsXray()) ui->actionExport_Xray_config->setVisible(true);
+        if (profile->outbound->IsXray() || profile->type == "chain") ui->actionExport_Xray_config->setVisible(true);
     });
     connect(ui->actionExport_Xray_config, &QAction::triggered, this, [=,this]() {
         auto ents = get_now_selected_list();
@@ -1082,6 +1084,7 @@ void MainWindow::show_group(int gid) {
     }
 
     if (Configs::dataManager->settingsRepo->current_group != gid) {
+        saveProfileFocusState();
         if (auto lastGroup = Configs::dataManager->groupsRepo->CurrentGroup()) {
             lastGroup->scroll_last_profile = ui->profilesTableView->firstVisibleRow();
             Configs::dataManager->groupsRepo->Save(lastGroup);
@@ -1220,10 +1223,10 @@ void MainWindow::dialog_message_impl(const QString &sender, const QString &info)
             profile_stop();
         } else if (info.startsWith("CoreStarted")) {
             Configs::IsAdmin(true);
-            if (Configs::dataManager->settingsRepo->remember_spmode.contains("system_proxy")) {
+            if (Configs::dataManager->settingsRepo->system_proxy_enabled) {
                 set_spmode_system_proxy(true, false);
             }
-            if (Configs::dataManager->settingsRepo->remember_spmode.contains("vpn") || Configs::dataManager->settingsRepo->flag_restart_tun_on) {
+            if (Configs::dataManager->settingsRepo->tun_mode_enabled || Configs::dataManager->settingsRepo->flag_restart_tun_on) {
                 set_spmode_vpn(true, false);
             }
             if (Configs::dataManager->settingsRepo->flag_dns_set) {
@@ -1442,7 +1445,7 @@ bool MainWindow::get_elevated_permissions(int reason) {
     auto n = QMessageBox::warning(GetMessageBoxParent(), software_name, tr("Please give the core root privileges"), QMessageBox::Yes | QMessageBox::No);
     if (n == QMessageBox::Yes)
     {
-        auto Command = QString("sudo chown root:wheel " + Configs::FindCoreRealPath() + " && " + "sudo chmod u+s "+Configs::FindCoreRealPath());
+        auto Command = QString("sudo chown root:wheel '%1' && sudo chmod u+s '%1'").arg(Configs::FindCoreRealPath());
         auto ret = Mac_Run_Command(Command);
         if (ret == 0) {
             MessageBoxInfo(tr("Requesting permission"), tr("Please Enter your password in the opened terminal, then try again"));
@@ -1470,10 +1473,7 @@ void MainWindow::set_spmode_vpn(bool enable, bool save) {
     }
 
     if (save) {
-        Configs::dataManager->settingsRepo->remember_spmode.removeAll("vpn");
-        if (enable) {
-            Configs::dataManager->settingsRepo->remember_spmode.append("vpn");
-        }
+        Configs::dataManager->settingsRepo->tun_mode_enabled = enable;
         Configs::dataManager->settingsRepo->Save();
     }
 
@@ -1489,45 +1489,16 @@ void MainWindow::UpdateDataView(bool force)
     {
         return;
     }
-    QString html;
-    if (showDownloadData)
-    {
-        qint64 count = 0;
-        if(currentDownloadReport.totalSize > 0)
-            count = 10 * currentDownloadReport.downloadedSize / currentDownloadReport.totalSize;
-        QString progressText;
-        for (int i = 0; i < 10; i++)
-        {
-            if (count--; count >=0) progressText += "#";
-            else progressText += "-";
-        }
-        QString stat = ReadableSize(currentDownloadReport.downloadedSize) + "/" + ReadableSize(currentDownloadReport.totalSize);
-        html = QString("<p style='text-align:center;margin:0;'>Downloading %1: %2 %3</p>").arg(currentDownloadReport.fileName, stat, progressText);
-    }
-    if (showSpeedtestData)
-    {
-        html += QString(
-    "<p style='text-align:center;margin:0;'>Running Speedtest: %1</p>"
-    "<div style='text-align: center;'>"
-    "<span style='color: #3299FF;'>Dl↓ %2</span>  "
-    "<span style='color: #86C43F;'>Ul↑ %3</span>"
-    "</div>"
-    "<p style='text-align:center;margin:0;'>Server: %4%5, %6</p>"
-        ).arg(currentSptProfileName,
-            currentTestResult.dl_speed.value().c_str(),
-            currentTestResult.ul_speed.value().c_str(),
-            CountryCodeToFlag(CountryNameToCode(QString::fromStdString(currentTestResult.server_country.value()))),
-            currentTestResult.server_country.value().c_str(),
-            currentTestResult.server_name.value().c_str());
-    }
-    ui->data_view->setHtml(html);
+    auto html = dataViewHtmlGenerator_.buildHtml();
+    runOnUiThread([=, this] {
+        ui->data_view->setHtml(html);
+    }, true);
     lastUpdated = QDateTime::currentDateTime();
 }
 
 void MainWindow::setDownloadReport(const DownloadProgressReport& report, bool show)
 {
-    showDownloadData = show;
-    currentDownloadReport = report;
+    dataViewHtmlGenerator_.setDownloadReport(report, show);
 }
 
 
@@ -1700,7 +1671,15 @@ QList<int> MainWindow::filterProfilesList(const QList<int>& profileIDs)
             MW_show_log("Null profile, maybe data is corrupted");
             continue;
         }
-        if ((addressFilterString.isEmpty() || profile->outbound->server.contains(addressFilterString, Qt::CaseInsensitive))
+        auto portMatches = [&]() {
+            QString val = addressFilterString.mid(5);
+            if (!val.contains(':')) return val.isEmpty() ? false : profile->outbound->server_port == val.toInt();
+            QStringList p = val.split(':');
+            bool minOk = p[0].isEmpty() || profile->outbound->server_port >= p[0].toInt();
+            bool maxOk = (p.size() < 2 || p[1].isEmpty()) || profile->outbound->server_port <= p[1].toInt();
+            return minOk && maxOk;
+        };
+        if ((addressFilterString.isEmpty() || (addressFilterString.startsWith("port=") ? portMatches() : profile->outbound->server.contains(addressFilterString, Qt::CaseInsensitive)))
             && (nameFilterString.isEmpty() || profile->outbound->name.contains(nameFilterString, Qt::CaseInsensitive))
             && (typeFilterString.isEmpty() || profile->type.contains(typeFilterString, Qt::CaseInsensitive))
             && (countryFilterString.isEmpty() || profile->test_country.contains(countryFilterString, Qt::CaseInsensitive)))
@@ -1755,7 +1734,8 @@ void MainWindow::refresh_status(const QString &traffic_update) {
     }
     //
     auto display_socks = DisplayAddress(Configs::dataManager->settingsRepo->inbound_address, Configs::dataManager->settingsRepo->inbound_socks_port);
-    auto inbound_txt = QString("Mixed: %1").arg(display_socks);
+    auto inbound_disabled = Configs::dataManager->settingsRepo->disable_mixed_inbound;
+    auto inbound_txt = QString("Mixed: %1").arg(inbound_disabled ? "Disabled" : display_socks);
     ui->label_inbound->setText(inbound_txt);
     //
     ui->checkBox_VPN->setChecked(Configs::dataManager->settingsRepo->spmode_vpn);
@@ -1919,7 +1899,9 @@ void MainWindow::refresh_proxy_list_column_size() {
 }
 
 void MainWindow::refresh_proxy_list(const QList<int>& ids, bool mayNeedReset) {
+    if (!Configs::dataManager->settingsRepo->refreshing_group) saveProfileFocusState();
     refresh_proxy_list_impl(ids, mayNeedReset);
+    if (mayNeedReset) restoreProfileFocusState();
 }
 
 void MainWindow::refresh_proxy_list_impl(const QList<int>& ids, bool mayNeedReset) {
@@ -2012,7 +1994,7 @@ void  MainWindow::on_menu_delete_repeat_triggered () {
         for (const auto &ent: out_del) {
             del_ids += ent->id;
         }
-        Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids);
+        Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids, true);
         refresh_proxy_list({}, true);
     }
 }
@@ -2021,7 +2003,7 @@ void MainWindow::on_menu_delete_triggered() {
     auto entIDs = get_now_selected_list();
     if (entIDs.count() == 0) return;
     if (Configs::dataManager->settingsRepo->skip_delete_confirmation || QMessageBox::question(this, tr("Confirmation"), QString(tr("Remove %1 item(s) ?")).arg(entIDs.count()))==QMessageBox::StandardButton::Yes) {
-        Configs::dataManager->profilesRepo->BatchDeleteProfiles(entIDs);
+        Configs::dataManager->profilesRepo->BatchDeleteProfiles(entIDs, true);
         refresh_proxy_list({}, true);
     }
 }
@@ -2049,7 +2031,9 @@ void MainWindow::on_menu_copy_links_triggered() {
     QStringList links;
     auto ents = Configs::dataManager->profilesRepo->GetProfileBatch(entIDs);
     for (const auto &ent: ents) {
-        links += ent->outbound->ExportToLink();
+        auto link = ent->outbound->ExportToLink();
+        if (link.isEmpty()) link = ent->outbound->ExportJsonLink();
+        links += link;
     }
     if (links.length() == 0) return;
     QApplication::clipboard()->setText(links.join("\n"));
@@ -2375,7 +2359,7 @@ void MainWindow::on_menu_remove_invalid_triggered() {
          for (const auto &ent: out_del) {
              del_ids += ent->id;
          }
-         Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids);
+         Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids, true);
          refresh_proxy_list({}, true);
      }
      });
@@ -2457,6 +2441,60 @@ QList<int> MainWindow::get_selected_or_group() {
     return profileIDs;
 }
 
+void MainWindow::saveProfileFocusState() {
+    auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+    if (group == nullptr) return;
+
+    if (!profilesTableModel) return;
+    QModelIndexList indices = ui->profilesTableView->selectionModel()->selectedRows(0);
+    group->selectedProfilesIdIdxPairs.clear();
+
+    for (const QModelIndex &idx : indices) {
+        group->selectedProfilesIdIdxPairs << std::make_pair(profilesTableModel->profileIdAt(idx.row()), idx.row());
+    }
+}
+
+void MainWindow::restoreProfileFocusState() {
+    auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+    if (group == nullptr || group->selectedProfilesIdIdxPairs.isEmpty()) return;
+
+    QList<int> newIndexes;
+    for (auto &id: group->selectedProfilesIdIdxPairs | std::views::keys) {
+        if (auto newIdx = profilesTableModel->indexOfProfile(id); newIdx != -1) {
+            newIndexes << newIdx;
+        }
+    }
+
+    ui->profilesTableView->setFocus();
+
+    if (!newIndexes.isEmpty()) {
+        // some profiles were selected, some of them remain, select the remaining ones
+        QItemSelection selection;
+
+        for (int row : newIndexes) {
+            QModelIndex left  = profilesTableModel->index(row, 0);
+            QModelIndex right = profilesTableModel->index(row, profilesTableModel->columnCount() - 1);
+            selection.select(left, right);
+        }
+        ui->profilesTableView->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        ui->profilesTableView->selectionModel()->setCurrentIndex(profilesTableModel->index(newIndexes.first(), 0), QItemSelectionModel::NoUpdate);
+        return;
+    }
+
+    auto desiredIndex = group->selectedProfilesIdIdxPairs.first().second;
+    desiredIndex = std::min(desiredIndex, static_cast<int>(profilesTableModel->profileIds().size() - 1));
+    if (desiredIndex < 0) return;
+
+    if (group->selectedProfilesIdIdxPairs.size() == 1) {
+        QItemSelection selection;
+        QModelIndex left  = profilesTableModel->index(desiredIndex, 0);
+        QModelIndex right = profilesTableModel->index(desiredIndex, profilesTableModel->columnCount() - 1);
+        selection.select(left, right);
+        ui->profilesTableView->selectionModel()->select(selection, QItemSelectionModel::Select);
+    }
+    ui->profilesTableView->selectionModel()->setCurrentIndex(profilesTableModel->index(desiredIndex, 0), QItemSelectionModel::NoUpdate);
+}
+
 void MainWindow::clearUnavailableProfiles(bool confirm, QList<int> profileIDs) {
     QList<int> del_ids;
     int remove_display_count = 0;
@@ -2477,7 +2515,7 @@ void MainWindow::clearUnavailableProfiles(bool confirm, QList<int> profileIDs) {
         }
     }
 
-    auto clearFunc = [=, this] {
+    auto clearFunc = [&, this] {
         Configs::dataManager->profilesRepo->BatchDeleteProfiles(del_ids);
         refresh_proxy_list({}, true);
     };

@@ -127,13 +127,15 @@ namespace Configs {
             outbound = new Configs::Custom();
         } else if (type == "extracore") {
             outbound = new Configs::extracore();
-        } else if (Configs::HasNaive() && type == "naive") {
+        } else if (type == "naive") {
             outbound = new Configs::naive();
+        } else if (type == "direct") {
+            outbound = new Configs::direct();
         } else {
             outbound = new Configs::outbound();
             outbound->invalid = true;
         }
-        
+
         profile->outbound = std::shared_ptr<Configs::outbound>(outbound);
         
         // Parse complex objects from JSON
@@ -310,13 +312,15 @@ namespace Configs {
             outbound = new Configs::Custom();
         } else if (type == "extracore") {
             outbound = new Configs::extracore();
-        } else if (Configs::HasNaive() && type == "naive") {
+        } else if (type == "naive") {
             outbound = new Configs::naive();
+        } else if (type == "direct") {
+            outbound = new Configs::direct();
         } else {
             outbound = new Configs::outbound();
             outbound->invalid = true;
         }
-        
+
         // Bean is legacy, pass nullptr
         return std::make_shared<Profile>(outbound, type);
     }
@@ -516,13 +520,14 @@ namespace Configs {
         return names;
     }
 
-    bool ProfilesRepo::BatchDeleteProfiles(const QList<int>& ids) {
+    bool ProfilesRepo::BatchDeleteProfiles(QList<int>& ids, bool stopRunningProfile) {
         QSet<int> groupIDs;
+        if (ids.contains(dataManager->settingsRepo->started_id)) {
+            if (stopRunningProfile) GetMainWindow()->profile_stop(false, true, false);
+            else ids.removeAll(dataManager->settingsRepo->started_id);
+        }
         auto profiles = GetProfileBatch(ids);
         for (const auto& ent : profiles) {
-            if (ent->id == dataManager->settingsRepo->started_id) {
-                GetMainWindow()->profile_stop(false, true, false);
-            }
             groupIDs.insert(ent->gid);
         }
         for (auto groupID : groupIDs) {

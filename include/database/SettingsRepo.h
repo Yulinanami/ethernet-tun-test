@@ -17,14 +17,15 @@ namespace Configs {
     private:
         Database& db;
 
-        // Helper methods
+        QMap<QString, bool*>        boolMap;
+        QMap<QString, int*>         intMap;
+        QMap<QString, QString*>     stringMap;
+        QMap<QString, QStringList*> stringListMap;
+
+        void initMaps();
         void createTables() const;
         void loadAllSettings();
         void saveAllSettings() const;
-        
-        // Serialization helpers
-        QString valueToString(const QVariant& value, const QString& key) const;
-        QVariant stringToValue(const QString& str, const QString& key) const;
 
     public:
         bool noSave = false;
@@ -43,7 +44,6 @@ namespace Configs {
         bool prepare_exit = false;
         bool spmode_vpn = false;
         bool spmode_system_proxy = false;
-        bool need_keep_vpn_off = false;
         QString appdataDir = "";
         QStringList ignoreConnTag = {};
         int imported_count = 0;
@@ -102,6 +102,7 @@ namespace Configs {
         // Network
         bool net_use_proxy = false;
         bool net_insecure = false;
+        bool reset_proxy_on_disable_sp = false;
 
         // Subscription
         QString user_agent = ""; // set at main.cpp
@@ -109,6 +110,7 @@ namespace Configs {
         bool sub_clear = false;
         bool sub_send_hwid = false;
         QString sub_custom_hwid_params = "";
+        bool allow_stopping_active_profile = false;
 
         // Security
         bool skip_cert = false;
@@ -117,7 +119,8 @@ namespace Configs {
         bool use_mozilla_certs = false;
 
         // Remember
-        QStringList remember_spmode = {};
+        bool system_proxy_enabled = false;
+        bool tun_mode_enabled = false;
         int remember_id = -1919;
         bool remember_enable = false;
         bool windows_set_admin = false;
@@ -139,11 +142,15 @@ namespace Configs {
         int ruleset_mirror = Mirrors::CLOUDFLARE;
 
         // Socks & HTTP Inbound
+        bool disable_mixed_inbound = false;
         QString inbound_address = "127.0.0.1";
         int inbound_socks_port = 2080; // Mixed, actually
         bool random_inbound_port = false;
         QString custom_inbound = "{\"inbounds\": []}";
         QString proxy_scheme = "{ip}:{port}";
+        bool inbound_auth = false;
+        QString inbound_user = "";
+        QString inbound_pass = "";
 
         // Routing
         QString custom_route_global = "{\"rules\": []}";
@@ -218,6 +225,11 @@ namespace Configs {
 
         // Extra Core Paths
         QStringList extraCorePaths = {};
+
+        // Bind address/interface custom entry history (last 5 per field)
+        QStringList dial_bind_interface_history = {};
+        QStringList dial_inet4_bind_address_history = {};
+        QStringList dial_inet6_bind_address_history = {};
 
         // Methods
         void UpdateStartedId(int id);

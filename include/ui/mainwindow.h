@@ -29,6 +29,7 @@
 
 #include "group/GroupSort.hpp"
 #include "include/global/GuiUtils.hpp"
+#include "include/ui/utils/DataViewHtmlGenerator.h"
 #include "include/ui/utils/ProfilesTableModel.h"
 #include "ui_mainwindow.h"
 
@@ -202,11 +203,7 @@ private:
     //
     // for data view
     QDateTime lastUpdated = QDateTime::currentDateTime();
-    QString currentSptProfileName;
-    bool showSpeedtestData = false;
-    bool showDownloadData = false;
-    libcore::SpeedTestResult currentTestResult;
-    DownloadProgressReport currentDownloadReport; // could use a list, but don't think can show more than one anyways
+    DataViewHtmlGenerator dataViewHtmlGenerator_;
 
     // shortcuts
     QList<QShortcut*> hiddenMenuShortcuts;
@@ -243,6 +240,12 @@ private:
     QList<int> get_now_selected_list();
 
     QList<int> get_selected_or_group();
+
+    void set_system_proxy(bool mustDisable);
+
+    void saveProfileFocusState();
+
+    void restoreProfileFocusState();
 
     void clearUnavailableProfiles(bool confirm = true, QList<int> profileIDs = {});
 
