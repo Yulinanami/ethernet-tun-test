@@ -12,6 +12,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    env:
+      DEST: ${{ github.workspace }}/deployment/windows64
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -20,7 +22,7 @@ jobs:
         uses: actions/cache@v4.2.3
         with:
           path: artifacts.tgz
-          key: CommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/*') }}-1.25.8
+          key: CommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/**') }}-1.25.8
       - name: Setup Go
         if: steps.cache-common.outputs.cache-hit != 'true'
         uses: actions/setup-go@v5.5.0
@@ -62,6 +64,8 @@ jobs:
     env:
       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
       INPUT_VERSION: ${{ github.event.inputs.tag }}
+      DEST: ${{ github.workspace }}/deployment/windows64
+      DEST_SUFFIX: windows-amd64
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
