@@ -1069,18 +1069,6 @@ namespace Configs {
 
         // rules
         auto routeRules = routeChain->get_route_rules(false, routeDeps->outboundMap);
-        if (Configs::dataManager->settingsRepo->spmode_vpn) {
-            routeRules.prepend(QJsonObject{
-                {"action", "hijack-dns"},
-                {"inbound", "tun-in"},
-                {"port", 53},
-            });
-            routeRules.prepend(QJsonObject{
-                {"action", "hijack-dns"},
-                {"inbound", "tun-in"},
-                {"protocol", "dns"},
-            });
-        }
         routeRules.prepend(QJsonObject{
             {"action", "route"},
             {"process_path", FindCoreRealPath()},
