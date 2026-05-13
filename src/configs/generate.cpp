@@ -505,6 +505,12 @@ namespace Configs {
                 {"strategy", dataManager->settingsRepo->direct_dns_strategy},
                 {"server", "dns-direct"},
             };
+            rules += QJsonObject{
+                {"process_name", QJsonArray{QStringLiteral("ThroneCore.exe"), QStringLiteral("ThroneCore")}},
+                {"action", "route"},
+                {"strategy", dataManager->settingsRepo->direct_dns_strategy},
+                {"server", "dns-direct"},
+            };
         }
 
         // HijackRules
@@ -1069,6 +1075,11 @@ namespace Configs {
 
         // rules
         auto routeRules = routeChain->get_route_rules(false, routeDeps->outboundMap);
+        routeRules.prepend(QJsonObject{
+            {"action", "route"},
+            {"process_name", QJsonArray{QStringLiteral("ThroneCore.exe"), QStringLiteral("ThroneCore")}},
+            {"outbound", "direct"},
+        });
         routeRules.prepend(QJsonObject{
             {"action", "route"},
             {"process_path", FindCoreRealPath()},
