@@ -20,15 +20,13 @@ namespace Configs_sys {
 
         void Kill();
 
-        CoreProcess(const QString &core_path, const QString &socketName, bool debugMode);
+        CoreProcess(const QString &core_path, const QStringList &args);
 
         void Restart();
 
         int start_profile_when_core_is_up = -1;
 
     private:
-        QString m_socketName;
-        bool m_debugMode = false;
         bool show_stderr = false;
         bool failed_to_start = false;
         bool restarting = false;

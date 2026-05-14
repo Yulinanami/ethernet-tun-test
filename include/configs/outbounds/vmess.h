@@ -8,6 +8,7 @@ namespace Configs
 {
 
     inline QStringList vmessSecurity = {"auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"};
+    inline QStringList vPacketEncoding = {"", "packetaddr", "xudp"};
 
     class vmess : public outbound
     {

@@ -28,7 +28,6 @@ namespace Configs
         bool enabled = false;
         QStringList config;
         QString config_path;
-        QString serverName;
 
         // baseConfig overrides
         bool ParseFromLink(const QString& link) override;

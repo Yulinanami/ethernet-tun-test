@@ -7,10 +7,10 @@
 namespace Configs {
     const int INVALID_ID = -99999;
 
-    enum simpleAction{bypass, block, proxy};
+    enum simpleAction{direct, block, proxy};
     inline QString simpleActionToString(simpleAction action)
     {
-        if (action == bypass) return {"direct"};
+        if (action == direct) return {"direct"};
         if (action == block) return {"block"};
         if (action == proxy) return {"proxy"};
         return {"invalid"};

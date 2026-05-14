@@ -11,8 +11,6 @@
 
 namespace Configs
 {
-    inline QStringList vPacketEncoding = {"", "packetaddr", "xudp"};
-
     class outbound : public baseConfig
     {
     public:
@@ -75,10 +73,6 @@ namespace Configs
         }
 
         virtual bool IsXray() { return false; }
-
-        virtual bool IsExtraCore() { return false; }
-
-        virtual bool IsXrayFullConfig() { return false; }
 
         virtual bool HasMux() { return false; }
 

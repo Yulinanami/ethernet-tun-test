@@ -63,7 +63,6 @@ namespace Configs {
         if (query.hasQueryItem("globalPadding")) global_padding = query.queryItemValue("globalPadding") == "true";
         if (query.hasQueryItem("authenticatedLength")) authenticated_length = query.queryItemValue("authenticatedLength") == "true";
         if (query.hasQueryItem("packetEncoding")) packet_encoding = query.queryItemValue("packetEncoding");
-        if (!Configs::vPacketEncoding.contains(packet_encoding)) packet_encoding = "";
 
         return !(uuid.isEmpty() || server.isEmpty());
     }
@@ -93,7 +92,7 @@ namespace Configs {
         uuid = QString::fromStdString(object.uuid);
         if (!object.cipher.empty()) security = QString::fromStdString(object.cipher);
         alter_id = object.alterId;
-        packet_encoding = QString::fromStdString(object.packet_encoding);
+        if (!object.packet_encoding.empty()) packet_encoding = QString::fromStdString(object.packet_encoding);
 
         tls->ParseFromClash(object);
         transport->ParseFromClash(object);
@@ -120,7 +119,7 @@ namespace Configs {
         if (alter_id > 0) query.addQueryItem("alterId", QString::number(alter_id));
         if (global_padding) query.addQueryItem("globalPadding", "true");
         if (authenticated_length) query.addQueryItem("authenticatedLength", "true");
-        query.addQueryItem("packetEncoding", packet_encoding.isEmpty() ? "none" : packet_encoding);
+        if (!packet_encoding.isEmpty()) query.addQueryItem("packetEncoding", packet_encoding);
         
         if (!query.isEmpty()) url.setQuery(query);
         return url.toString(QUrl::FullyEncoded);
@@ -136,7 +135,7 @@ namespace Configs {
         if (alter_id > 0) object["alter_id"] = alter_id;
         if (global_padding) object["global_padding"] = global_padding;
         if (authenticated_length) object["authenticated_length"] = authenticated_length;
-        object["packet_encoding"] = packet_encoding;
+        if (!packet_encoding.isEmpty()) object["packet_encoding"] = packet_encoding;
         if (auto tlsObj = tls->ExportToJson(); !tlsObj.isEmpty()) object["tls"] = tlsObj;
         if (auto transportObj = transport->ExportToJson(); !transportObj.isEmpty()) object["transport"] = transportObj;
         if (auto muxObj = multiplex->ExportToJson(); !muxObj.isEmpty()) object["multiplex"] = muxObj;
@@ -153,7 +152,7 @@ namespace Configs {
         if (alter_id > 0) object["alter_id"] = alter_id;
         if (global_padding) object["global_padding"] = global_padding;
         if (authenticated_length) object["authenticated_length"] = authenticated_length;
-        object["packet_encoding"] = packet_encoding;
+        if (!packet_encoding.isEmpty()) object["packet_encoding"] = packet_encoding;
         if (auto tlsObj = tls->Build().object; !tlsObj.isEmpty()) object["tls"] = tlsObj;
         if (auto transportObj = transport->Build().object; !transportObj.isEmpty()) object["transport"] = transportObj;
         if (auto muxObj = multiplex->Build().object; !muxObj.isEmpty()) object["multiplex"] = muxObj;

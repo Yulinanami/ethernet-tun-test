@@ -38,6 +38,4 @@ private:
 
 private slots:
     void on_core_settings_clicked();
-    void on_backup_create_clicked();
-    void on_backup_restore_clicked();
 };

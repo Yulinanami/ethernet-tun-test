@@ -10,19 +10,11 @@ namespace Subscription {
         outboundObject,
         invalid,
     };
-    enum class XraySubType {
-        outboundInJson,
-        outboundJsonArray,
-        outboundObject,
-        invalid,
-    };
     class RawUpdater {
     public:
-        void update(const QString &str, bool needParse = true, bool isBase64Decoded = false);
+        void update(const QString &str, bool needParse);
 
         void updateSingBox(const QJsonDocument &doc, SingBoxSubType type);
-
-        void updateXray(const QJsonDocument &doc, XraySubType type);
 
         void updateClash(const QString &str);
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QDialog>
-#include <QStringList>
 #include "ui_edit_advanced.h"
 #include "include/database/entities/Profile.h"
 
@@ -33,10 +32,6 @@ private slots:
 private:
     Ui::EditAdvanced *ui;
     std::shared_ptr<Configs::Profile> ent;
-
-    QStringList m_systemInterfaces;
-    QStringList m_systemIpv4Addresses;
-    QStringList m_systemIpv6Addresses;
 
     struct {
         QStringList echConfig;

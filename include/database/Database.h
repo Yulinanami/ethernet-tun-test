@@ -231,10 +231,5 @@ namespace Configs {
                 NotifyError("execBatchReplaceProfiles", e);
             }
         }
-
-        // Throws std::exception on failure. Caller must delete destPath if it already exists.
-        void backupTo(const std::string& destPath);
-        // Throws std::exception on failure.
-        void restoreFrom(const std::string& srcPath);
     };
 }

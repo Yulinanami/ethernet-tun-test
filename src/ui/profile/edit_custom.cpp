@@ -24,34 +24,19 @@ void EditCustom::onStart(std::shared_ptr<Configs::Profile> _ent) {
     this->ent = _ent;
     auto outbound = this->ent->Custom();
 
-    if (preset_core == Configs::Custom::CustomOutbound) {
+    if (preset_core == "outbound") {
         preset_command = preset_config = "";
         ui->config_simple->setPlaceholderText(
             "{\n"
             "    \"type\": \"socks\",\n"
             "    // ...\n"
             "}");
-    } else if (preset_core == Configs::Custom::CustomFullConfig) {
+    } else if (preset_core == "fullconfig") {
         preset_command = preset_config = "";
         ui->config_simple->setPlaceholderText(
             "{\n"
             "    \"inbounds\": [],\n"
             "    \"outbounds\": []\n"
-            "}");
-    } else if (preset_core == Configs::Custom::CustomXrayOutbound) {
-        preset_command = preset_config = "";
-        ui->config_simple->setPlaceholderText(
-            "{\n"
-            "    \"protocol\": \"vless\",\n"
-            "    \"settings\": { /* ... */ }\n"
-            "}");
-    } else if (preset_core == Configs::Custom::CustomXrayFullConfig) {
-        preset_command = preset_config = "";
-        ui->config_simple->setPlaceholderText(
-            "{\n"
-            "    \"inbounds\": [],\n"
-            "    \"outbounds\": [],\n"
-            "    \"routing\": {}\n"
             "}");
     }
 
@@ -59,12 +44,8 @@ void EditCustom::onStart(std::shared_ptr<Configs::Profile> _ent) {
     ui->config_simple->setPlainText(outbound->config);
 
     // custom internal
-    if (preset_core == Configs::Custom::CustomOutbound) {
+    if (preset_core == "outbound") {
         ui->core_l->setText(tr("Outbound JSON, please read the documentation."));
-    } else if (preset_core == Configs::Custom::CustomXrayOutbound) {
-        ui->core_l->setText(tr("Xray outbound JSON, please read the Xray documentation."));
-    } else if (preset_core == Configs::Custom::CustomXrayFullConfig) {
-        ui->core_l->setText(tr("Xray full config (Throne adds a socks inbound and uses sing-box for tun/routing)."));
     } else {
         ui->core_l->setText(tr("Please fill the complete config."));
     }

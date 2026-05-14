@@ -5,7 +5,6 @@
 
 #include "include/configs/common/Outbound.h"
 #include "include/configs/outbounds/anyTLS.h"
-#include "include/configs/outbounds/direct.h"
 #include "include/configs/outbounds/chain.h"
 #include "include/configs/outbounds/custom.h"
 #include "include/configs/outbounds/extracore.h"
@@ -133,10 +132,6 @@ namespace Configs {
 
         [[nodiscard]] Configs::chain *Chain() const {
             return dynamic_cast<Configs::chain *>(outbound.get());
-        };
-
-        [[nodiscard]] Configs::direct *Direct() const {
-            return dynamic_cast<Configs::direct *>(outbound.get());
         };
 
         [[nodiscard]] Configs::extracore *ExtraCore() const {
