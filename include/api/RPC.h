@@ -10,9 +10,13 @@ class QLocalSocket;
 namespace API {
     class Client {
     public:
-        explicit Client(std::function<void(const QString &)> onError, QLocalSocket *socket);
+        Client();
 
         ~Client();
+
+        // Adopt a freshly connected socket, replacing any previous
+        // connection. The Client itself is long-lived and never recreated.
+        void Reconnect(QLocalSocket *socket);
 
         // QString returns is error string
 
@@ -51,7 +55,6 @@ namespace API {
     private:
         class LocalSocketChannel;
         std::unique_ptr<LocalSocketChannel> channel;
-        std::function<void(const QString &)> onError;
     };
 
     inline Client *defaultClient;

@@ -82,6 +82,7 @@ void UI_InitMainWindow() {
     mainwindow = new MainWindow;
 }
 
+// Caller must hold coreProcessMutex (reads core_process lock-free by design).
 bool MainWindow::verify_core_pid(QLocalSocket *socket) {
     if (!core_process) return false;
     qint64 expectedPid = core_process->processId();
@@ -155,7 +156,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     qvLogDocument->setMaximumBlockCount(Configs::dataManager->settingsRepo->max_log_line);
     ui->masterLogBrowser->setUndoRedoEnabled(false);
     ui->masterLogBrowser->setDocument(qvLogDocument);
-    ui->masterLogBrowser->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    applyLogBrowserFont();
     updateLogFilterFields();
     runOnThread([=, this] {
         log_process_loop();
@@ -178,18 +179,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
             // bi-mode themes, follow system preference
             new SyntaxHighlighter(isDarkMode(), qvLogDocument);
         }
-    });
-    connect(ui->masterLogBrowser->verticalScrollBar(), &QSlider::valueChanged, this, [=,this](int value) {
-        if (ui->masterLogBrowser->verticalScrollBar()->maximum() == value)
-            qvLogAutoScoll = true;
-        else
-            qvLogAutoScoll = false;
-    });
-    connect(ui->masterLogBrowser, &QTextBrowser::textChanged, this, [=,this]() {
-        if (!qvLogAutoScoll)
-            return;
-        auto bar = ui->masterLogBrowser->verticalScrollBar();
-        bar->setValue(bar->maximum());
+        scheduleProxyListRefresh();
     });
     MW_show_log = [=,this](const QString &log) {
         append_log(log);
@@ -222,15 +212,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
 
     connect(core_server, &QLocalServer::newConnection, this, [=, this]() {
         auto socket = core_server->nextPendingConnection();
-        if (!verify_core_pid(socket)) {
-            MW_show_log("[Warn] IPC connection from unexpected process rejected");
-            socket->close();
-            socket->deleteLater();
-            return;
+        int profileId = -1;
+        {
+            // Hold coreProcessMutex so we never observe a half-published
+            // core_process while DS_cores is still constructing/starting it.
+            QMutexLocker lock(&coreProcessMutex);
+            if (!verify_core_pid(socket)) {
+                MW_show_log("[Warn] IPC connection from unexpected process rejected");
+                socket->close();
+                socket->deleteLater();
+                return;
+            }
+            if (core_process) {
+                profileId = core_process->start_profile_when_core_is_up;
+                core_process->start_profile_when_core_is_up = -1;
+            }
         }
         setup_rpc(socket);
-        auto profileId = core_process ? core_process->start_profile_when_core_is_up : -1;
-        if (core_process) core_process->start_profile_when_core_is_up = -1;
         Configs::dataManager->settingsRepo->core_running = true;
         MW_dialog_message("ExternalProcess", "CoreStarted," + Int2String(profileId));
     });
@@ -239,6 +237,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     auto socketFullName = core_server->fullServerName();
     runOnThread(
         [=, this] {
+            QMutexLocker lock(&coreProcessMutex);
             core_process = new Configs_sys::CoreProcess(core_path, socketFullName, coreDebugMode);
             if (Configs::dataManager->settingsRepo->remember_enable &&
                 Configs::dataManager->settingsRepo->remember_id >= 0) {
@@ -248,15 +247,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
             core_process->Start();
         },
         DS_cores);
-
-#ifdef Q_OS_LINUX
-    for (int i=0;i<20;i++)
-    {
-        QThread::msleep(100);
-        if (Configs::dataManager->settingsRepo->core_running) break;
-    }
-    if (!Configs::dataManager->settingsRepo->core_running) qDebug() << "[Warn] Core is taking too much time to start";
-#endif
 
     if (!Configs::dataManager->settingsRepo->font.isEmpty()) {
         auto font = qApp->font();
@@ -1031,6 +1021,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     connect(t, &QTimer::timeout, this, [&] { Configs_sys::logCounter.fetchAndStoreRelaxed(0); });
     t->start(1000);
 
+    // debounced refresh so font/theme/resize changes settle without manual interaction;
+    // mirrors what show_group does after a tab switch. Fired from changeEvent (FontChange/
+    // PaletteChange/StyleChange), resizeEvent, and ThemeManager::themeChanged.
+    m_proxyListRefreshDebounce = new QTimer(this);
+    m_proxyListRefreshDebounce->setSingleShot(true);
+    connect(m_proxyListRefreshDebounce, &QTimer::timeout, this, [this] { refresh_proxy_list({}, false); });
+
     // auto update timer
     TM_auto_update_subsctiption = new QTimer;
     TM_auto_update_subsctiption_Reset_Minute = [&](int m) {
@@ -1052,6 +1049,67 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     } else {
         on_menu_exit_triggered();
     }
+}
+
+void MainWindow::applyLogBrowserFont() {
+    QFont logFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    int pt = qApp->font().pointSize();
+    if (pt <= 0) pt = Configs::dataManager->settingsRepo->font_size;
+    if (pt > 0) logFont.setPointSize(pt);
+    ui->masterLogBrowser->setFont(logFont);
+}
+
+void MainWindow::changeEvent(QEvent *event) {
+    if (event->type() == QEvent::FontChange) {
+        // masterLogBrowser keeps its monospace family but follows the user's point size
+        applyLogBrowserFont();
+
+        // Widgets with per-widget stylesheets (set in the .ui files — tabWidgets, toolButtons,
+        // etc.) get wrapped in QStyleSheetStyle, which caches font-dependent metrics like tab
+        // size hints and button paddings. Those caches don't invalidate on FontChange, so the
+        // visible size stays at the old font. Toggling the stylesheet through "" forces
+        // QStyleSheetStyle::repolish, which clears the cache and re-evaluates rules.
+        auto refreshStylesheetCache = [](QWidget *w) {
+            QString ss = w->styleSheet();
+            if (ss.isEmpty()) return;
+            w->setStyleSheet("");
+            w->setStyleSheet(ss);
+        };
+        const auto allChildren = findChildren<QWidget*>();
+        for (QWidget *w : allChildren) {
+            refreshStylesheetCache(w);
+        }
+
+        // profilesTableView has no per-widget stylesheet, so the stylesheet trick above
+        // doesn't apply. Toggle its font through a different point size to force a real
+        // FontChange (Qt skips setFont when the resolved font is unchanged), then return
+        // to inheriting from qApp so future changes still propagate. Both updates coalesce.
+        auto forceFontReapply = [](QWidget *w) {
+            if (!w) return;
+            QFont currentFont = QApplication::font();
+            QFont diffFont = currentFont;
+            diffFont.setPointSize(currentFont.pointSize() + 1);
+            w->setFont(diffFont);
+            w->setFont(QFont());
+            w->updateGeometry();
+        };
+        forceFontReapply(ui->profilesTableView);
+    }
+    if (event->type() == QEvent::FontChange ||
+        event->type() == QEvent::PaletteChange ||
+        event->type() == QEvent::StyleChange) {
+        scheduleProxyListRefresh();
+    }
+    QMainWindow::changeEvent(event);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+    scheduleProxyListRefresh();
+}
+
+void MainWindow::scheduleProxyListRefresh() {
+    if (m_proxyListRefreshDebounce) m_proxyListRefreshDebounce->start(200);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
@@ -1281,10 +1339,10 @@ void MainWindow::dialog_message_impl(const QString &sender, const QString &info)
             profile_stop();
         } else if (info.startsWith("CoreStarted")) {
             Configs::IsAdmin(true);
-            if (Configs::dataManager->settingsRepo->system_proxy_enabled) {
+            if (Configs::dataManager->settingsRepo->remember_system_proxy) {
                 set_spmode_system_proxy(true, false);
             }
-            if (Configs::dataManager->settingsRepo->tun_mode_enabled || Configs::dataManager->settingsRepo->flag_restart_tun_on) {
+            if (Configs::dataManager->settingsRepo->remember_tun || Configs::dataManager->settingsRepo->flag_restart_tun_on) {
                 set_spmode_vpn(true, false);
             }
             if (Configs::dataManager->settingsRepo->flag_dns_set) {
@@ -1354,24 +1412,30 @@ void MainWindow::on_menu_hotkey_settings_triggered() {
 
 void MainWindow::on_commitDataRequest() {
     qDebug() << "Start of data save";
-    //
-    Configs::dataManager->settingsRepo->mainWindowGeometry = this->saveGeometry().toBase64(QByteArray::Base64Encoding);
+
+    auto* settings = Configs::dataManager->settingsRepo.get();
+
+    settings->mainWindowGeometry = this->saveGeometry().toBase64(QByteArray::Base64Encoding);
     if (!isMaximized()) {
-        auto olds = Configs::dataManager->settingsRepo->mw_size;
         auto news = QString("%1x%2").arg(size().width()).arg(size().height());
-        if (olds != news) {
-            Configs::dataManager->settingsRepo->mw_size = news;
-        }
+        if (settings->mw_size != news) settings->mw_size = news;
     }
-    //
-    Configs::dataManager->settingsRepo->splitter_state = ui->splitter->saveState().toBase64();
-    //
-    auto last_id = Configs::dataManager->settingsRepo->started_id;
-    if (Configs::dataManager->settingsRepo->remember_enable && last_id >= 0) {
-        Configs::dataManager->settingsRepo->remember_id = last_id;
+    settings->splitter_state = ui->splitter->saveState().toBase64();
+
+    // Snapshot the live app state on exit so "remember last proxy" restores it
+    // on the next launch. Capturing it here, rather than when each toggle
+    // happens, makes the result independent of the order in which the user
+    // toggled the proxy/tun modes vs. the remember option itself.
+    if (settings->remember_enable) {
+        if (settings->started_id >= 0) settings->remember_id = settings->started_id;
+        settings->remember_system_proxy = settings->spmode_system_proxy;
+        settings->remember_tun = settings->spmode_vpn;
+    } else {
+        settings->remember_system_proxy = false;
+        settings->remember_tun = false;
     }
-    //
-    Configs::dataManager->settingsRepo->Save();
+
+    settings->Save();
     qDebug() << "End of data save";
 }
 
@@ -1543,7 +1607,6 @@ void MainWindow::set_spmode_system_proxy(bool enable, bool save) {
     }
 
     if (save) {
-        Configs::dataManager->settingsRepo->system_proxy_enabled = enable && Configs::dataManager->settingsRepo->remember_enable;
         Configs::dataManager->settingsRepo->Save();
     }
 
@@ -1564,7 +1627,6 @@ void MainWindow::set_spmode_vpn(bool enable, bool save) {
     }
 
     if (save) {
-        Configs::dataManager->settingsRepo->tun_mode_enabled = enable;
         Configs::dataManager->settingsRepo->Save();
     }
 
@@ -2680,8 +2742,21 @@ void MainWindow::log_process_loop() {
         logMutex.unlock();
 
         if (!batchToPrint.isEmpty()) {
-            runOnUiThread([=, this] {
-               FastAppendTextDocument(batchToPrint.trimmed(), qvLogDocument);
+            QString trimmedBatch = batchToPrint.trimmed();
+            runOnUiThread([trimmedBatch = std::move(trimmedBatch), this] {
+                auto bar = ui->masterLogBrowser->verticalScrollBar();
+                auto layout = qvLogDocument->documentLayout();
+                // Anchor to the block at the top of the viewport; if trim shifts its
+                // document-Y afterwards, we replay the original sub-block offset.
+                QTextBlock anchorBlock = ui->masterLogBrowser->cursorForPosition(QPoint(0, 0)).block();
+                int viewportOffset = bar->value() - static_cast<int>(layout->blockBoundingRect(anchorBlock).y());
+                FastAppendTextDocument(trimmedBatch, qvLogDocument);
+                if (Configs::dataManager->settingsRepo->log_auto_scroll) {
+                    bar->setValue(bar->maximum());
+                } else if (anchorBlock.isValid()) {
+                    int newY = static_cast<int>(layout->blockBoundingRect(anchorBlock).y());
+                    bar->setValue(newY + viewportOffset);
+                }
             });
         }
     }

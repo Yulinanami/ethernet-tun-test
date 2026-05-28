@@ -77,7 +77,7 @@ jobs:
       - name: Build App
         shell: bash
         run: |
-          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.0/Qt_6.11.0_x64.7z
+          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.1/Qt_6.11.1_x64.7z
           7z x qt.7z
           curl -L -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_x64.7z
           7z x openssl.7z
@@ -91,6 +91,7 @@ jobs:
           cd ..
           ./script/deploy_windows.sh
         env:
+          INPUT_VERSION: ${{ github.event.inputs.tag }}
           DEST: ${{ github.workspace }}/deployment/windows-amd64
           DEST_SUFFIX: windows-amd64
       - name: Verify Deployment Contents
