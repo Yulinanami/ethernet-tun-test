@@ -24,7 +24,31 @@
 #endif
 #ifdef Q_OS_LINUX
 #include <include/sys/linux/coreDump.h>
+#include <include/sys/linux/DesktopEntry.h>
 #include <qfontdatabase.h>
+#endif
+#ifdef Q_OS_MACOS
+#include <QFileOpenEvent>
+
+// On macOS the OS reuses the running app and delivers throne:// URLs as a
+// QFileOpenEvent to the application object (never via argv). This filter feeds
+// them into the common deeplink pipeline.
+class MacDeeplinkFilter : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override {
+        if (event->type() == QEvent::FileOpen) {
+            const QString url = static_cast<QFileOpenEvent *>(event)->url().toString();
+            if (url.startsWith("throne://")) {
+                Deeplink_Submit(url);
+                return true;
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+};
 #endif
 
 void signal_handler(int signum) {
@@ -72,6 +96,23 @@ int main(int argc, char* argv[]) {
     QApplication::setQuitOnLastWindowClosed(false);
     QApplication a(argc, argv);
 
+    // Stable application id, matching the installed Throne.desktop. This sets the
+    // Wayland app_id / X11 WM_CLASS, which is the identity the XDG desktop portal
+    // keys on. Global shortcuts (and other portals) persist per app id, so without
+    // a stable one the GlobalShortcuts portal would re-prompt on every startup.
+    QGuiApplication::setDesktopFileName(QStringLiteral("Throne"));
+#ifdef Q_OS_LINUX
+    // Portable/zip installs ship no system desktop entry; ensure a per-user
+    // ~/.local/share/applications/Throne.desktop exists so the portal can resolve
+    // the app id above to a desktop entry (no-op if the .deb already installed one).
+    DesktopEntry_Ensure();
+#endif
+
+#ifdef Q_OS_MACOS
+    // Install before the event loop so launch-by-deeplink FileOpen events are caught.
+    a.installEventFilter(new MacDeeplinkFilter(&a));
+#endif
+
 #if !defined(Q_OS_MACOS) && (QT_VERSION >= QT_VERSION_CHECK(6,9,0))
     // Load the emoji fonts
 #ifdef Q_OS_WIN
@@ -96,6 +137,9 @@ int main(int argc, char* argv[]) {
     }
 
     QStringList arguments = QApplication::arguments();
+    // A throne:// URL may be passed as a launch argument (Windows/Linux). Delivered
+    // after the window is up, or forwarded to the primary instance via the socket below.
+    const QString launchDeeplink = Deeplink_ExtractFromArgs(arguments);
 
     // dirs & clean
     auto wd = QDir(QApplication::applicationDirPath());
@@ -205,6 +249,12 @@ int main(int argc, char* argv[]) {
     if (socket.waitForConnected(250))
     {
         qDebug() << "Another instance is running, let's wake it up and quit";
+        // Hand off a deeplink (if any) so the primary instance handles it.
+        if (!launchDeeplink.isEmpty()) {
+            socket.write(launchDeeplink.toUtf8());
+            socket.flush();
+            socket.waitForBytesWritten(250);
+        }
         socket.disconnectFromServer();
         return 0;
     }
@@ -219,9 +269,16 @@ int main(int argc, char* argv[]) {
     QObject::connect(&server, &QLocalServer::newConnection, qApp, [&] {
         auto s = server.nextPendingConnection();
         qDebug() << "Another instance tried to wake us up on " << serverName << s;
-        s->close();
+        // The waking instance may forward a throne:// deeplink as payload.
+        auto readPayload = [s] {
+            if (s->bytesAvailable() <= 0) return;
+            Deeplink_Submit(QString::fromUtf8(s->readAll()).trimmed());
+        };
+        QObject::connect(s, &QLocalSocket::readyRead, s, readPayload);
+        QObject::connect(s, &QLocalSocket::disconnected, s, &QLocalSocket::deleteLater);
+        readPayload(); // in case the payload already arrived
         // raise main window
-        MW_dialog_message("", "Raise");
+        MW_dialog_message(MwMessage::Raise, {});
     });
     QObject::connect(qApp, &QApplication::aboutToQuit, [&]
     {
@@ -248,5 +305,11 @@ int main(int argc, char* argv[]) {
 #endif
 
     UI_InitMainWindow();
+
+    // Deliver a deeplink passed on the command line (cold start), and replay any that
+    // arrived during startup (e.g. a macOS FileOpen event before the window existed).
+    if (!launchDeeplink.isEmpty()) Deeplink_Submit(launchDeeplink);
+    Deeplink_FlushPending();
+
     return QApplication::exec();
 }

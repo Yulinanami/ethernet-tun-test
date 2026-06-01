@@ -174,7 +174,9 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/sagernet/sing-box => github.com/Throneproj/sing-box v1.11.16-0.20260516014442-9d6d801badca
+replace github.com/sagernet/sing-box => github.com/Throneproj/sing-box v1.11.16-0.20260531155042-90f9ec606d49
+
+replace github.com/sagernet/wireguard-go => github.com/throneproj/wireguard-go v0.0.0-20260531154859-70cd3fe8a5c2
 
 replace github.com/sagernet/cronet-go => github.com/parhelia512/cronet-go v0.0.0-20260515230114-6df543aa5cbc
 

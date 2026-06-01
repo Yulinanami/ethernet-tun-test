@@ -205,12 +205,15 @@ QList<int> MkManyPorts(int num) {
     QList<int> res;
     QList<QTcpServer*> servers;
     for (int i=0;i<num;i++) {
-        QTcpServer s;
-        s.listen();
-        servers.append(&s);
-        res.append(s.serverPort());
+        auto server = new QTcpServer();
+        server->listen();
+        servers.append(server);
+        res.append(server->serverPort());
     }
-    for (const auto s: servers) s->close();
+    for (const auto s: servers) {
+        s->close();
+        delete s;
+    }
     servers.clear();
     return res;
 }
@@ -329,6 +332,31 @@ void runOnUiThread(const std::function<void()> &callback, bool wait) {
     if (wait && QThread::currentThread() != thread) {
         loop.exec();
     }
+}
+
+static QString g_pendingDeeplink;
+
+QString Deeplink_ExtractFromArgs(const QStringList &args) {
+    for (const auto &arg : args) {
+        if (arg.startsWith("throne://")) return arg;
+    }
+    return {};
+}
+
+void Deeplink_Submit(const QString &url) {
+    if (url.isEmpty() || !url.startsWith("throne://")) return;
+    if (MW_handle_deeplink) {
+        MW_handle_deeplink(url);
+    } else {
+        g_pendingDeeplink = url; // main window not up yet; replayed by Deeplink_FlushPending
+    }
+}
+
+void Deeplink_FlushPending() {
+    if (g_pendingDeeplink.isEmpty() || !MW_handle_deeplink) return;
+    const QString url = g_pendingDeeplink;
+    g_pendingDeeplink.clear();
+    MW_handle_deeplink(url);
 }
 
 void runOnNewThread(const std::function<void()> &callback, bool wait) {
