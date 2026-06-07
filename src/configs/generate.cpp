@@ -14,6 +14,19 @@
 #include "include/database/entities/Profile.h"
 #include "include/sys/linux/systemChecks.h"
 
+#include <algorithm>
+#include <string_view>
+
+namespace {
+    // Single binary search over the sorted ruleSetList — replaces the
+    // ruleSetMap.contains + ruleSetMap.at lookups from the former std::map.
+    std::string_view ruleSetUrl(std::string_view key) {
+        auto it = std::lower_bound(ruleSetList.begin(), ruleSetList.end(), key,
+            [](const auto& e, std::string_view k) { return e.first < k; });
+        return (it != ruleSetList.end() && it->first == key) ? it->second : std::string_view{};
+    }
+}
+
 namespace Configs {
 
     QString genTunName() {
@@ -626,8 +639,12 @@ namespace Configs {
 
         auto dnsObj = QJsonObject{
             {"servers", servers},
-            {"rules", rules}
+            {"rules", rules},
+            {"cache_capacity", dataManager->settingsRepo->dns_cache_capacity},
         };
+        if (dataManager->settingsRepo->dns_disable_cache) dnsObj["disable_cache"] = true;
+        if (dataManager->settingsRepo->dns_disable_expire) dnsObj["disable_expire"] = true;
+        if (dataManager->settingsRepo->dns_reverse_mapping) dnsObj["reverse_mapping"] = true;
         if (independentCache) dnsObj["independent_cache"] = true;
         ctx->buildConfigResult->coreConfig["dns"] = dnsObj;
     }
@@ -1207,9 +1224,19 @@ namespace Configs {
 
         // rules
         auto routeRules = routeChain->get_route_rules(false, routeDeps->outboundMap);
+        QJsonArray coreProcessPaths;
+        coreProcessPaths.append(FindCoreRealPath());
+        if (!ctx->buildConfigResult->extraCoreData->path.isEmpty())
+        {
+            auto extraCorePath = ctx->buildConfigResult->extraCoreData->path;
+#ifdef Q_OS_WIN
+            extraCorePath.replace("/", "\\");
+#endif
+            coreProcessPaths.append(extraCorePath);
+        }
         routeRules.prepend(QJsonObject{
             {"action", "route"},
-            {"process_path", FindCoreRealPath()},
+            {"process_path", coreProcessPaths},
             {"outbound", "direct"},
         });
         if (!ctx->forTest) {
@@ -1240,12 +1267,12 @@ namespace Configs {
                         };
             }
             else
-                if(ruleSetMap.contains(item.toStdString())) {
+                if (auto url = ruleSetUrl(item.toStdString()); !url.empty()) {
                     ruleSetArray += QJsonObject{
                                 {"type", "remote"},
                                 {"tag", item},
                                 {"format", "binary"},
-                                {"url", get_jsdelivr_link(QString::fromStdString(ruleSetMap.at(item.toStdString())))},
+                                {"url", get_jsdelivr_link(QString::fromUtf8(url.data(), url.size()))},
                             };
                 }
         }

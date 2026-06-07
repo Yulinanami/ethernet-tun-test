@@ -7,6 +7,10 @@ on:
         description: "Optional label for the test build"
         required: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-go:
     permissions:
@@ -39,8 +43,8 @@ jobs:
       - name: Install protoc plugins
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: |
-          go install github.com/golang/protobuf/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
       - name: Build Go Core
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
