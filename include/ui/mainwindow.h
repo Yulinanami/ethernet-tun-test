@@ -18,12 +18,15 @@
 
 #include <QKeyEvent>
 #include <QSystemTrayIcon>
+#include <QPointer>
 #include <QTimer>
 #include <QQueue>
 #include <QWaitCondition>
 #include <QProcess>
 #include <QTextDocument>
 #include <QShortcut>
+#include <QKeySequence>
+#include <QSet>
 #include <QCheckBox>
 #include <QSemaphore>
 #include <QMutex>
@@ -43,6 +46,10 @@ namespace Configs_sys {
     class CoreProcess;
 }
 
+class TrayProfileSelector;
+
+namespace Qv2ray::ui { class SyntaxHighlighter; }
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
     class MainWindow;
@@ -56,6 +63,12 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
     ~MainWindow() override;
+
+    // Runtime Stats panel helpers, read on the UI thread. GetCorePid returns 0
+    // when the core process isn't running; GetRunningConfigName is empty when no
+    // profile is active.
+    qint64 GetCorePid();
+    QString GetRunningConfigName();
 
     void prepare_exit();
 
@@ -72,6 +85,8 @@ public:
     void profile_start(int _id = -1);
 
     void profile_stop(bool crash = false, bool block = false, bool manual = false);
+
+    int get_profile_to_start();
 
     void set_spmode_system_proxy(bool enable, bool save = true);
 
@@ -169,20 +184,30 @@ private:
     Ui::MainWindow *ui;
     ProfilesTableModel *profilesTableModel = nullptr;
     QSystemTrayIcon *tray;
-    QMenu *trayServerMenu = nullptr;
-    int trayServerPage = 0;
+    QMenu *trayMenu = nullptr;    // tray context menu
+    // Tray "Select Server"/"Select Routing" open this small Qt-drawn popup instead of a
+    // submenu, because a tray submenu isn't painted by Qt on Linux (SNI/DBusMenu) or macOS
+    // (native NSMenu) and so can't reliably expand a dynamic list. Recreated on each open.
+    QPointer<TrayProfileSelector> traySelector;
+    void openTraySelector(bool routing);
     QShortcut *shortcut_esc = new QShortcut(QKeySequence::Cancel, this);
     //
     QThreadPool *parallelCoreCallPool = new QThreadPool(this);
     std::atomic<bool> stopSpeedtest = false;
     QMutex speedtestRunning;
     std::atomic<bool> currentUnderTest = false;
+    // Speed-test byte accounting. Tests bypass the clash tracker (they dial the
+    // outbound directly), so their traffic is counted only here: the core reports
+    // each test's cumulative bytes, and we diff against the last reported value
+    // per outbound tag to credit the delta. Guarded so the live micro-poll and
+    // the final reconciliation pass don't race.
+    QMutex speedtestCreditMu_;
+    QHash<QString, QPair<qint64, qint64>> speedtestCredited_;
     //
     Configs_sys::CoreProcess *core_process = nullptr;
     QMutex coreProcessMutex; // serializes core_process init (DS_cores) vs IPC newConnection (UI)
     QLocalServer *core_server = nullptr;
     bool rpc_started = false;
-    QMutex defaultClientMutex;
     qint64 vpn_pid = 0;
     //
     QTextDocument *qvLogDocument = new QTextDocument(this);
@@ -190,6 +215,12 @@ private:
     QString title_error;
     int icon_status = -1;
     std::shared_ptr<Configs::Profile> running;
+    int last_running_profile_id = -1;
+    // True from the moment a profile start is kicked off until it succeeds or
+    // fails; drives the start/stop button's transient "Connecting" state.
+    bool m_profileConnecting = false;
+    // True while a profile stop is in progress; drives the "Disconnecting" state.
+    bool m_profileDisconnecting = false;
     QString traffic_update_cache;
     qint64 last_test_time = 0;
     //
@@ -233,22 +264,41 @@ private:
     QMutex logMutex;
     QQueue<QString> logQueue;
     QWaitCondition logWaiter;
+    Qv2ray::ui::SyntaxHighlighter *logHighlighter = nullptr;
+
+    // Immutable snapshot of the log filter fields. The log thread copies these
+    // under logMutex (Qt containers are copy-on-write, so it's O(1)) and then
+    // filters without holding the lock, so producers calling append_log() are
+    // never blocked on the regex/keyword work.
+    struct LogFilter {
+        bool enableInclude = false;
+        bool enableExclude = false;
+        QStringList includeKeywords;
+        QStringList excludeKeywords;
+        QRegularExpression includeCombined;
+        QRegularExpression excludeCombined;
+    };
 
     void append_log(const QString &log);
 
     void log_process_loop();
 
-    bool should_print_log(const QString &log);
+    bool should_print_log(const QString &log, const LogFilter &filter);
 
     void updateLogFilterFields();
+
+    // (Re)installs the log syntax highlighter, deleting any previous one so
+    // highlighters don't stack up (and keep re-highlighting) on theme changes.
+    void setLogHighlighter(bool darkMode);
 
     QList<int> filterProfilesList(const QList<int>& profileIDs);
 
     QList<int> get_now_selected_list();
+    void refresh_startstop_button();
 
     QList<int> get_selected_or_group();
 
-    void set_system_proxy(bool mustDisable);
+    void set_system_proxy(bool enable);
 
     void saveProfileFocusState();
 
@@ -261,6 +311,12 @@ private:
     void handle_deeplink_impl(const QString &url);
 
     void handle_addsub(const QString &url, const QString &name, bool autoUpdate);
+
+    void handle_import_route(const QString &url);
+
+    // throne://remoteRoute?data=<...> : add one or more remote routing profiles. The data is
+    // (base64 of) a JSON array of {url, auto_update[, name]} objects.
+    void handle_add_remote_routes(const QString &url);
 
     // Routes user-supplied text: throne:// links go to the deeplink handler, the
     // rest to the subscription/profile importer.
@@ -280,7 +336,17 @@ private:
 
     void changeEvent(QEvent *event) override;
 
+    void showEvent(QShowEvent *event) override;
+
+    void hideEvent(QHideEvent *event) override;
+
     void resizeEvent(QResizeEvent *event) override;
+
+    // Tell the connection lister whether its tab is actually on screen (stats tab
+    // selected, window neither minimized nor hidden to tray) so it can drop to a
+    // relaxed poll cadence when nobody is looking. Recomputed on tab/visibility
+    // changes.
+    void syncConnectionViewState();
 
     void dragEnterEvent(QDragEnterEvent *event);
 
@@ -292,11 +358,36 @@ private:
     QTimer *m_proxyListRefreshDebounce = nullptr;
     void scheduleProxyListRefresh();
 
+    bool m_adjustingColumns = false;
+
+    // Watches the physical default-route interface while a profile whose Xray
+    // egress is interface-bound (sockopt.interface) is running. A static bind is
+    // baked at build time. The pin (IP_UNICAST_IF) keeps working while that
+    // interface stays up, so we only rebuild+restart once the bound interface
+    // actually goes down (unplug/disconnect) — not merely because the preferred
+    // default route moved to another still-optional interface. Inactive while
+    // m_boundEgressInterface is empty (no interface-bound egress).
+    QTimer *m_defaultInterfaceWatch = nullptr;
+    QString m_boundEgressInterface;
+    int m_ifcDownStreak = 0;   // consecutive watch ticks the bound egress looked down (fast rebind)
+    int m_ifcMovedStreak = 0;  // consecutive ticks the default moved off a still-up bound egress (slow rebind)
+    void checkDefaultInterfaceChange();
+
     //
 
     void HotkeyEvent(const QString &key);
 
     void RegisterHiddenMenuShortcuts(bool unregister = false);
+    // Register a QShortcut for every action in `menu` (recursing into submenus),
+    // appending them to hiddenMenuShortcuts. Needed because the menubar is hidden,
+    // so actions reachable only through popup menus get no shortcut on their own.
+    // `claimed` holds the key sequences already handled (either by Qt automatically
+    // or by an earlier call); shortcuts already in it are skipped to avoid the
+    // ambiguous-shortcut conflict that breaks actions shared with other menus.
+    void registerMenuShortcuts(QMenu *menu, QSet<QKeySequence> &claimed);
+    // Collect the shortcut key sequences of every action in `menu` (recursing into
+    // submenus) into `out`, without registering anything.
+    void collectMenuShortcuts(QMenu *menu, QSet<QKeySequence> &out);
 
     void setActionsData();
 
@@ -332,7 +423,17 @@ private:
 
     void setupConnectionList();
 
+    void setupConnectionSortMenu();
+
     void querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent);
+
+    // Credit the delta between a test's cumulative bytes (curUp/curDown) and the
+    // last reported values for `tag`. Feeds the time-series stats (the tested
+    // config + a synthetic "Speedtest" app) and the legacy per-profile total.
+    // Speed tests bypass the clash tracker, so the looper never sees these bytes;
+    // this is the only place they are counted, for both a selected-profile test
+    // and a current-instance test.
+    void creditSpeedtestTraffic(const std::shared_ptr<Configs::Profile>& profile, const QString& tag, qint64 curUp, qint64 curDown);
 
     void queryCountryTest(const QMap<QString, int>& tag2entID, bool testCurrent);
 

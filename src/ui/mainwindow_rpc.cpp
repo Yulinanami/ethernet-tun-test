@@ -1,6 +1,7 @@
 #include "include/ui/mainwindow.h"
 
 #include "include/stats/traffic/TrafficLooper.hpp"
+#include "include/stats/traffic/TrafficStatsManager.hpp"
 #include "include/api/RPC.h"
 #include "include/ui/utils//MessageBoxTimer.h"
 #include "3rdparty/qv2ray/v2/proxy/QvProxyConfigurator.hpp"
@@ -10,6 +11,9 @@
 #include <QDesktopServices>
 #include <QMessageBox>
 #include <QJsonDocument>
+#include <QFile>
+#include <QNetworkInterface>
+#include <QHostAddress>
 
 #include "include/configs/generate.h"
 #include "include/database/GroupsRepo.h"
@@ -26,13 +30,9 @@
 using namespace API;
 
 void MainWindow::setup_rpc(QLocalSocket *socket) {
-    // The Client is long-lived and never recreated; on core restart we only
-    // swap the underlying connection so worker threads holding `defaultClient`
-    // never touch freed memory.
-    QMutexLocker lock(&defaultClientMutex);
-    if (defaultClient == nullptr) {
-        defaultClient = new Client();
-    }
+    // The Client is constructed once at startup and never recreated; on core
+    // restart we only swap the underlying connection, so worker threads holding
+    // `defaultClient` never touch freed memory.
     defaultClient->Reconnect(socket);
 
     // Loopers run for the lifetime of the app, start only once
@@ -459,6 +459,8 @@ void MainWindow::speedtest_current_group(const QList<int>& profileIDs, bool test
 
     runOnNewThread([this, profileIDs, testCurrent]() {
         stopSpeedtest.store(false);
+        // Fresh per-tag byte baselines for this speed-test session.
+        { QMutexLocker lk(&speedtestCreditMu_); speedtestCredited_.clear(); }
         if (!testCurrent)
         {
             dataViewHtmlGenerator_.seedSpeedTest(profileIDs.size());
@@ -490,7 +492,7 @@ void MainWindow::speedtest_current_group(const QList<int>& profileIDs, bool test
         } else
         {
             dataViewHtmlGenerator_.seedSpeedTest(1);
-            runSpeedTest("", "", true, true, {}, {}, -1);
+            runSpeedTest("", "", false, true, {}, {}, -1);
             currentUnderTest.store(false);
         }
         dataViewHtmlGenerator_.clearTestSections();
@@ -501,6 +503,25 @@ void MainWindow::speedtest_current_group(const QList<int>& profileIDs, bool test
             MW_show_log(tr("Speedtest finished!"));
         });
     });
+}
+
+void MainWindow::creditSpeedtestTraffic(const std::shared_ptr<Configs::Profile>& profile, const QString& tag, qint64 curUp, qint64 curDown)
+{
+    if (profile == nullptr || tag.isEmpty()) return;
+    if (Configs::dataManager->settingsRepo->disable_traffic_stats) return;
+    QMutexLocker lk(&speedtestCreditMu_);
+    auto& base = speedtestCredited_[tag];
+    const qint64 dUp = curUp >= base.first ? curUp - base.first : curUp;
+    const qint64 dDown = curDown >= base.second ? curDown - base.second : curDown;
+    base = qMakePair(curUp, curDown);
+    if (dUp <= 0 && dDown <= 0) return;
+
+    Stats::trafficStatsManager->AddConfigDelta(profile->id, dUp, dDown);
+    Stats::trafficStatsManager->AddAppDelta(Stats::SPEEDTEST_APP_NAME, "", dUp, dDown);
+
+    profile->traffic_uplink += dUp;
+    profile->traffic_downlink += dDown;
+    Configs::dataManager->profilesRepo->SaveTraffic(profile);
 }
 
 void MainWindow::querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent)
@@ -516,6 +537,8 @@ void MainWindow::querySpeedtest(const QMap<QString, int>& tag2entID, bool testCu
     {
         return;
     }
+    creditSpeedtestTraffic(profile, QString::fromStdString(res.result.value().outbound_tag.value()),
+                           res.result.value().ul_bytes.value(), res.result.value().dl_bytes.value());
     runOnUiThread([=, this]
     {
         dataViewHtmlGenerator_.setSpeedtestProgress(profile->outbound->name, res.result.value());
@@ -637,6 +660,9 @@ void MainWindow::runSpeedTest(const QString& config, const QString& xrayConfig, 
             continue;
         }
 
+        creditSpeedtestTraffic(ent, QString::fromStdString(res.outbound_tag.value()),
+                               res.ul_bytes.value(), res.dl_bytes.value());
+
         if (res.cancelled.value()) continue;
 
         if (res.error.value().empty()) {
@@ -678,6 +704,122 @@ bool MainWindow::set_system_dns(bool set, bool save_set) {
     return true;
 }
 
+namespace {
+// An interface-bound Xray egress pins its outbound socket to a specific physical
+// interface via sockopt.interface (IP_UNICAST_IF on Windows). That pin keeps
+// working as long as the interface itself is up with a routable address — even
+// if the OS's *preferred* default route later moves elsewhere (a second NIC
+// coming up, an automatic-metric change, Wi-Fi and Ethernet both connected).
+// So "GetDefaultInterface() now names a different interface" is NOT by itself a
+// reason to rebuild: we only need to rebind (via a restart) once the bound
+// interface has actually gone down. Restarting on every preferred-default change
+// turned benign interface churn into a restart storm — a full VPN blackout every
+// few seconds that also tore down the DNS resolvers, surfacing as lookup errors.
+//
+// The name here is what GetDefaultInterface() returns, i.e. Go's
+// net.Interface.Name, which on Windows is the adapter friendly name and maps to
+// QNetworkInterface::humanReadableName() (name() is matched too, defensively).
+bool egressInterfaceStillUsable(const QString &name) {
+    if (name.isEmpty()) return false;
+    for (const auto &ni : QNetworkInterface::allInterfaces()) {
+        if (ni.humanReadableName() != name && ni.name() != name) continue;
+        if (!ni.flags().testFlag(QNetworkInterface::IsUp)) return false;
+        // A disconnected/unplugged adapter keeps its row but loses its routable
+        // address (drops to APIPA 169.254.x / IPv6 link-local, or nothing). Treat
+        // presence of any non-loopback, non-link-local address as "still viable".
+        for (const auto &entry : ni.addressEntries()) {
+            const QHostAddress ip = entry.ip();
+            if (ip.isNull() || ip.isLoopback() || ip.isLinkLocal()) continue;
+            return true;
+        }
+        return false;
+    }
+    return false; // no longer present -> gone
+}
+
+// The watch fires every 3s (m_defaultInterfaceWatch). Require the bound egress
+// to look down for kIfcDownTicks (~6s) before a prompt rebind, or merely
+// deprioritized-but-still-up for kIfcMovedTicks (~30s) before a slow rebind.
+constexpr int kIfcDownTicks = 2;
+constexpr int kIfcMovedTicks = 10;
+} // namespace
+
+void MainWindow::checkDefaultInterfaceChange() {
+    if (running == nullptr || m_boundEgressInterface.isEmpty()) {
+        if (m_defaultInterfaceWatch) m_defaultInterfaceWatch->stop();
+        m_ifcDownStreak = 0;
+        m_ifcMovedStreak = 0;
+        return;
+    }
+    bool ok = false;
+    QString cur = defaultClient->GetDefaultInterface(&ok);
+    if (!ok || cur.isEmpty() || cur == m_boundEgressInterface) {
+        // Still pinned to the preferred default (or detection unavailable): idle.
+        m_ifcDownStreak = 0;
+        m_ifcMovedStreak = 0;
+        return;
+    }
+
+    // The preferred default route moved off the interface our Xray egress is
+    // pinned to. Two cases, handled at deliberately different speeds so ordinary
+    // interface churn (a second NIC appearing, an automatic-metric change, Wi-Fi
+    // and Ethernet both up) can never trigger a restart storm:
+    const bool boundUsable = egressInterfaceStillUsable(m_boundEgressInterface);
+    if (!boundUsable) {
+        // Bound interface is unplugged/disabled/gone: the pin is dead, so rebind
+        // promptly (~6s) onto the new default.
+        m_ifcMovedStreak = 0;
+        if (++m_ifcDownStreak < kIfcDownTicks) return;
+    } else {
+        // Bound interface still looks up (present, IsUp, has a routable address)
+        // yet the OS has preferred another interface for a sustained stretch. The
+        // pin usually still carries traffic, so only rebind if this persists —
+        // e.g. the bound link quietly lost its own default route while keeping
+        // its address. Confirm over ~30s so a metric blip or a briefly-appearing
+        // NIC is ignored. The rebuild re-pins to the new default, so this fires
+        // at most once per real change rather than looping.
+        m_ifcDownStreak = 0;
+        if (++m_ifcMovedStreak < kIfcMovedTicks) return;
+    }
+
+    m_ifcDownStreak = 0;
+    m_ifcMovedStreak = 0;
+    if (m_defaultInterfaceWatch) m_defaultInterfaceWatch->stop(); // re-armed on successful restart
+    const int startedId = running->id;
+    MW_show_log(tr("[interface-bind] rebinding egress: bound interface %1 %2 (default route now %3)")
+                    .arg(m_boundEgressInterface,
+                         boundUsable ? tr("deprioritized too long") : tr("is down"),
+                         cur));
+    profile_start(startedId);
+}
+
+int MainWindow::get_profile_to_start() {
+    auto ents = get_now_selected_list();
+    if (ents.size() == 1) {
+        return ents.first();
+    }
+    if (ents.isEmpty()) {
+        if (last_running_profile_id >= 0 && Configs::dataManager->profilesRepo->GetProfile(last_running_profile_id) != nullptr) {
+            return last_running_profile_id;
+        }
+        int rememberId = Configs::dataManager->settingsRepo->remember_id;
+        if (rememberId >= 0 && Configs::dataManager->profilesRepo->GetProfile(rememberId) != nullptr) {
+            return rememberId;
+        }
+        auto currentGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+        if (currentGroup) {
+            auto profiles = currentGroup->Profiles();
+            if (!profiles.isEmpty()) {
+                int firstId = profiles.first();
+                if (Configs::dataManager->profilesRepo->GetProfile(firstId) != nullptr) {
+                    return firstId;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
 void MainWindow::profile_start(int _id) {
     if (Configs::dataManager->settingsRepo->prepare_exit) return;
 #ifdef Q_OS_LINUX
@@ -689,9 +831,18 @@ void MainWindow::profile_start(int _id) {
     }
 #endif
 
-    auto ents = get_now_selected_list();
-    auto ent = (_id < 0 && !ents.isEmpty()) ? Configs::dataManager->profilesRepo->GetProfile(ents.first()) : Configs::dataManager->profilesRepo->GetProfile(_id);
+    std::shared_ptr<Configs::Profile> ent = nullptr;
+    if (_id >= 0) {
+        ent = Configs::dataManager->profilesRepo->GetProfile(_id);
+    } else {
+        int startId = get_profile_to_start();
+        if (startId >= 0) {
+            ent = Configs::dataManager->profilesRepo->GetProfile(startId);
+        }
+    }
     if (ent == nullptr) return;
+
+    last_running_profile_id = ent->id;
 
     if (select_mode) {
         emit profile_selected(ent->id);
@@ -731,6 +882,53 @@ void MainWindow::profile_start(int _id) {
             return false;
         }
         if (!error.isEmpty()) {
+            // The Xray config's routing referenced geoip:/geosite: tags but the
+            // .dat asset(s) aren't in our asset dir (XRAY_LOCATION_ASSET points at
+            // GetBasePath()). Handle this out-of-band: fail this start attempt right
+            // away — blocking here to download would trip the "no response" restart
+            // prompt — then asynchronously prompt, download in the background, and
+            // ask the user to start the profile again. We deliberately don't
+            // auto-start; the env var is already set on the live core, so simply
+            // starting the profile again picks the assets up with no core restart.
+            if (error.contains("geoip.dat") || error.contains("geosite.dat")) {
+                const auto profileName = ent->outbound->DisplayTypeAndName();
+                runOnUiThread([=, this] {
+                    // Small delay so this attempt's UI teardown (Connecting -> idle)
+                    // finishes before the prompt appears.
+                    setTimeout([=, this] {
+                        if (QMessageBox::question(this, tr("Geo asset files required"),
+                                tr("The Xray config \"%1\" uses geoip/geosite routing rules, but the "
+                                   "required data files (geoip.dat / geosite.dat) are not installed.\n\n"
+                                   "Download them now?").arg(profileName)) != QMessageBox::Yes) return;
+                        // Download in the background so the UI stays responsive;
+                        // DownloadAsset reports progress in the data view. Fetch both
+                        // missing files up front (Xray only reports the first it hit).
+                        runOnNewThread([=, this] {
+                            const QString base = Configs::GetBasePath();
+                            QString dlErr;
+                            if (!QFile::exists(base + "/geoip.dat")) {
+                                auto e = NetworkRequestHelper::DownloadAsset(Configs::dataManager->settingsRepo->xray_geoip_url, "geoip.dat");
+                                if (!e.isEmpty()) dlErr += "geoip.dat: " + e + "\n";
+                            }
+                            if (!QFile::exists(base + "/geosite.dat")) {
+                                auto e = NetworkRequestHelper::DownloadAsset(Configs::dataManager->settingsRepo->xray_geosite_url, "geosite.dat");
+                                if (!e.isEmpty()) dlErr += "geosite.dat: " + e + "\n";
+                            }
+                            runOnUiThread([=, this] {
+                                if (!dlErr.isEmpty()) {
+                                    MessageBoxWarning(tr("Geo asset download failed"), dlErr);
+                                } else {
+                                    MW_show_log(tr("Downloaded Xray geo asset files."));
+                                    QMessageBox::information(this, tr("Geo assets installed"),
+                                        tr("Geo data files were downloaded successfully.\n\n"
+                                           "Please start your profile again."));
+                                }
+                            });
+                        });
+                    }, this, 300);
+                });
+                return false;
+            }
             if (error.contains("configure tun interface")) {
                 runOnUiThread([=, this] {
 
@@ -764,11 +962,19 @@ void MainWindow::profile_start(int _id) {
 
         Configs::dataManager->settingsRepo->UpdateStartedId(ent->id);
         running = ent;
-        set_system_proxy(false);
+        if (Configs::dataManager->settingsRepo->spmode_system_proxy) set_system_proxy(true);
 
         runOnUiThread([=, this] {
             refresh_status();
             refresh_proxy_list({ent->id});
+
+            // Arm the default-interface watch when this profile baked a static
+            // egress interface bind; otherwise make sure it's stopped.
+            m_boundEgressInterface = result->boundInterface;
+            m_ifcDownStreak = 0;
+            m_ifcMovedStreak = 0;
+            if (m_boundEgressInterface.isEmpty()) m_defaultInterfaceWatch->stop();
+            else m_defaultInterfaceWatch->start();
 
             auto resp = NetworkRequestHelper::HttpGet("http://ip-api.com/json/", false, true);
             if (resp.error.isEmpty()) {
@@ -817,6 +1023,12 @@ void MainWindow::profile_start(int _id) {
     connect(restartMsgbox, &QMessageBox::accepted, this, [=,this] { MW_dialog_message(MwMessage::RestartProgram, {}); });
     auto restartMsgboxTimer = new MessageBoxTimer(this, restartMsgbox, 10000);
 
+    // Show the "Connecting" state until the start resolves below.
+    runOnUiThread([this] {
+        m_profileConnecting = true;
+        refresh_startstop_button();
+    });
+
     runOnNewThread([=, this] {
         // stop current running
         if (running != nullptr) {
@@ -831,10 +1043,13 @@ void MainWindow::profile_start(int _id) {
         }
         mu_starting.unlock();
         // cancel timeout
-        runOnUiThread([=] {
+        runOnUiThread([=, this] {
             restartMsgboxTimer->cancel();
             restartMsgboxTimer->deleteLater();
             restartMsgbox->deleteLater();
+            // Start has resolved (success or failure); leave the Connecting state.
+            m_profileConnecting = false;
+            refresh_startstop_button();
         });
     });
 }
@@ -861,7 +1076,7 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
                 return false;
             }
         }
-        set_system_proxy(true);
+        if (Configs::dataManager->settingsRepo->spmode_system_proxy) set_system_proxy(false);
         return true;
     };
 
@@ -871,12 +1086,22 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
 
     UpdateConnectionListWithRecreate({});
 
+    // Show a "Disconnecting" spinner immediately; the stop itself can lag.
+    runOnUiThread([this] {
+        m_profileDisconnecting = true;
+        refresh_startstop_button();
+    });
+
     runOnNewThread([=, this] {
         Stats::trafficLooper->loop_enabled = false;
         Stats::connection_lister->suspend = true;
         Stats::trafficLooper->loop_mutex.lock();
         Stats::trafficLooper->UpdateAll();
         Stats::trafficLooper->loop_mutex.unlock();
+        // Flush the final per-profile totals (only persisted every few seconds
+        // during the session) and the partial minute bucket before going down.
+        Stats::trafficLooper->PersistTraffic();
+        Stats::trafficStatsManager->Flush();
 
         QMessageBox* restartMsgbox;
         MessageBoxTimer* restartMsgboxTimer;
@@ -901,6 +1126,13 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
             restartMsgboxTimer->deleteLater();
             restartMsgbox->deleteLater();
 
+            // Interface-bound egress (if any) is gone; stop watching the route.
+            if (m_defaultInterfaceWatch) m_defaultInterfaceWatch->stop();
+            m_boundEgressInterface.clear();
+            m_ifcDownStreak = 0;
+            m_ifcMovedStreak = 0;
+
+            m_profileDisconnecting = false;
             refresh_status();
             refresh_proxy_list({id});
 

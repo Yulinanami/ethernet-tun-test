@@ -41,7 +41,7 @@
      <property name="styleSheet">
       <string notr="true">QTabWidget::pane {
     margin-top: 1px;
-    border: 1px solid #555555;
+    border: 1px solid #777777;
     border-radius: 4px;
 }
 
@@ -51,7 +51,7 @@ QTabBar {
 }
 
 QTabBar::tab {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
     border-radius: 4px;
 
     padding: 2px 4px;
@@ -63,11 +63,11 @@ QTabBar::tab:selected {
 }
 
 QTabBar::tab:!selected {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
 }
 
 QTabBar::tab:hover:!selected {
-    border: 1px solid #555555;
+    border: 1px solid #777777;
 }</string>
      </property>
      <property name="tabShape">
@@ -627,6 +627,16 @@ QTabBar::tab:hover:!selected {
               </property>
              </widget>
             </item>
+            <item row="1" column="0" colspan="3">
+             <widget class="QCheckBox" name="disable_traffic_aggregation">
+              <property name="toolTip">
+               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Fully disables the traffic aggregation feature (per-config and per-app usage history kept in a separate database, shown in the Traffic Stats dashboard). Does not affect the per-profile traffic counters in the main window.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+              </property>
+              <property name="text">
+               <string>Disable Traffic Aggregation</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </widget>
          </item>
@@ -792,34 +802,24 @@ QTabBar::tab:hover:!selected {
        <string>Subscription</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_7">
-       <item row="7" column="0" colspan="2">
-        <widget class="QCheckBox" name="sub_send_hwid">
-         <property name="toolTip">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;HWID=%1&lt;/p&gt;&lt;p&gt;OS=%2&lt;/p&gt;&lt;p&gt;OS Version=%3&lt;/p&gt;&lt;p&gt;Model=%4&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-         </property>
-         <property name="text">
-          <string>Enable sending HWID, device model, and OS version when updating subscription</string>
-         </property>
-        </widget>
-       </item>
-       <item row="8" column="1">
+       <item row="9" column="1">
         <widget class="QLineEdit" name="sub_custom_hwid_params">
          <property name="placeholderText">
           <string>hwid=custom_value,os=custom_os,osVersion=custom_version,model=custom_model</string>
          </property>
         </widget>
        </item>
-       <item row="1" column="1">
-        <widget class="MyLineEdit" name="user_agent"/>
-       </item>
-       <item row="3" column="0">
+       <item row="4" column="0">
         <widget class="QCheckBox" name="sub_clear">
          <property name="text">
           <string>Clear servers before updating subscription</string>
          </property>
         </widget>
        </item>
-       <item row="0" column="0">
+       <item row="2" column="1">
+        <widget class="MyLineEdit" name="user_agent"/>
+       </item>
+       <item row="1" column="0">
         <widget class="QLabel" name="label_20">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
@@ -828,21 +828,11 @@ QTabBar::tab:hover:!selected {
           </sizepolicy>
          </property>
          <property name="text">
-          <string>Automatic update</string>
+          <string>Subscription auto update</string>
          </property>
         </widget>
        </item>
-       <item row="8" column="0">
-        <widget class="QLabel" name="label_custom_hwid_params">
-         <property name="toolTip">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Format: hwid=value,os=value,osVersion=value,model=value&lt;/p&gt;&lt;p&gt;Leave empty to use default values. Only specify the parameters you want to override.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-         </property>
-         <property name="text">
-          <string>Custom System Parameters (optional)</string>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="1">
+       <item row="1" column="1">
         <layout class="QHBoxLayout" name="horizontalLayout_5">
          <item>
           <widget class="QCheckBox" name="sub_auto_update_enable">
@@ -876,20 +866,87 @@ QTabBar::tab:hover:!selected {
          </item>
         </layout>
        </item>
-       <item row="1" column="0">
-        <widget class="QLabel" name="label_4">
+       <item row="8" column="0" colspan="2">
+        <widget class="QCheckBox" name="sub_send_hwid">
+         <property name="toolTip">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;HWID=%1&lt;/p&gt;&lt;p&gt;OS=%2&lt;/p&gt;&lt;p&gt;OS Version=%3&lt;/p&gt;&lt;p&gt;Model=%4&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
          <property name="text">
-          <string>User Agent</string>
+          <string>Enable sending HWID, device model, and OS version when updating subscription</string>
          </property>
         </widget>
        </item>
-       <item row="2" column="0">
+       <item row="9" column="0">
+        <widget class="QLabel" name="label_custom_hwid_params">
+         <property name="toolTip">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Format: hwid=value,os=value,osVersion=value,model=value&lt;/p&gt;&lt;p&gt;Leave empty to use default values. Only specify the parameters you want to override.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="text">
+          <string>Custom System Parameters (optional)</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="0">
         <widget class="QCheckBox" name="allow_stopping_active_profile">
          <property name="toolTip">
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;When enabled, If the currently active profile needs to be removed, it will be stopped and removed, otherwise it will not be removed at all&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
          <property name="text">
           <string>Allow stopping the active profile</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="0">
+        <widget class="QLabel" name="label_4">
+         <property name="text">
+          <string>User Agent</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <layout class="QHBoxLayout" name="horizontalLayout_route_auto_update">
+         <item>
+          <widget class="QCheckBox" name="route_auto_update_enable">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="text">
+            <string>Enable</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_route_auto_update_interval">
+           <property name="text">
+            <string>Interval (minute, invalid if less than 30)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="route_auto_update">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item row="0" column="0">
+        <widget class="QLabel" name="label_route_auto_update">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="text">
+          <string>Routing profiles auto update</string>
          </property>
         </widget>
        </item>
@@ -992,6 +1049,129 @@ QTabBar::tab:hover:!selected {
            </widget>
           </item>
           <item>
+           <widget class="QWidget" name="frag_tricks_group" native="true">
+            <layout class="QHBoxLayout" name="horizontalLayout_frag_tricks">
+             <property name="leftMargin">
+              <number>0</number>
+             </property>
+             <property name="topMargin">
+              <number>0</number>
+             </property>
+             <property name="rightMargin">
+              <number>0</number>
+             </property>
+             <property name="bottomMargin">
+              <number>0</number>
+             </property>
+             <item>
+              <widget class="QLabel" name="fragment_implementation_l">
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                 <horstretch>0</horstretch>
+                 <verstretch>0</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="text">
+                <string>TLS Fragment</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QComboBox" name="fragment_implementation">
+               <property name="toolTip">
+                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Which TLS fragmentation implementation profiles use: built-in (sing-box tls.fragment) or custom (Hiddify dialer-level ClientHello fragmentation).&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QCheckBox" name="fragment_default_on">
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                 <horstretch>0</horstretch>
+                 <verstretch>0</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="toolTip">
+                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Fragment profiles whose Fragment setting is left on &amp;quot;Keep Default&amp;quot;.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               </property>
+               <property name="text">
+                <string>Default On</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLabel" name="fragment_size_l">
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                 <horstretch>0</horstretch>
+                 <verstretch>0</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="text">
+                <string>Size</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLineEdit" name="fragment_size">
+               <property name="maximumSize">
+                <size>
+                 <width>80</width>
+                 <height>16777215</height>
+                </size>
+               </property>
+               <property name="toolTip">
+                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Custom implementation only: bytes per ClientHello fragment, as a range min-max (e.g. 10-100).&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLabel" name="fragment_sleep_l">
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                 <horstretch>0</horstretch>
+                 <verstretch>0</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="text">
+                <string>Sleep</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLineEdit" name="fragment_sleep">
+               <property name="maximumSize">
+                <size>
+                 <width>80</width>
+                 <height>16777215</height>
+                </size>
+               </property>
+               <property name="toolTip">
+                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Custom implementation only: milliseconds to sleep between fragment bursts, as a range min-max (e.g. 2-5).&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="Line" name="line">
+               <property name="orientation">
+                <enum>Qt::Orientation::Vertical</enum>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QCheckBox" name="tls_tricks_default_on">
+               <property name="toolTip">
+                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enable mixed-case SNI for profiles whose TLS Tricks setting is left on &amp;quot;Keep Default&amp;quot;.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               </property>
+               <property name="text">
+                <string>TLS Tricks Default On</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
            <widget class="QPushButton" name="core_settings">
             <property name="text">
              <string>Core Options</string>
@@ -1076,6 +1256,30 @@ QTabBar::tab:hover:!selected {
                  </item>
                 </widget>
                </item>
+               <item>
+                <widget class="QLabel" name="ntp_outbound_l">
+                 <property name="text">
+                  <string>outbound</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QComboBox" name="ntp_outbound">
+                 <property name="toolTip">
+                  <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Which outbound the NTP query is sent through&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                 </property>
+                 <item>
+                  <property name="text">
+                   <string notr="true">direct</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string notr="true">proxy</string>
+                  </property>
+                 </item>
+                </widget>
+               </item>
               </layout>
              </item>
             </layout>
@@ -1137,6 +1341,32 @@ QTabBar::tab:hover:!selected {
           </item>
           <item row="1" column="1">
            <widget class="QComboBox" name="vless_xray_pref"/>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="label_xray_geoip_url">
+            <property name="toolTip">
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;URL for geoip.dat, downloaded when a full Xray config's routing needs geoip: rules.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            </property>
+            <property name="text">
+             <string>GeoIP Asset URL</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="xray_geoip_url"/>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="label_xray_geosite_url">
+            <property name="toolTip">
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;URL for geosite.dat, downloaded when a full Xray config's routing needs geosite: rules.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            </property>
+            <property name="text">
+             <string>GeoSite Asset URL</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QLineEdit" name="xray_geosite_url"/>
           </item>
          </layout>
         </widget>

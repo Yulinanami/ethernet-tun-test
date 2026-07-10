@@ -96,6 +96,10 @@ namespace Configs {
                 "uplinkHTTPMethod",
                 "sessionPlacement",
                 "sessionKey",
+                "sessionIDPlacement",
+                "sessionIDKey",
+                "sessionIDTable",
+                "sessionIDLength",
                 "seqPlacement",
                 "seqKey",
                 "uplinkDataPlacement",
@@ -141,6 +145,11 @@ namespace Configs {
             else object.remove(key);
         }
 
+        void exportInt(QJsonObject& object, const QString& key, int value) {
+            if (value != 0) object[key] = value;
+            else object.remove(key);
+        }
+
         void parseString(const QJsonObject& object, const QString& key, QString& target) {
             if (object.contains(key)) target = object[key].toString();
         }
@@ -155,6 +164,10 @@ namespace Configs {
 
         void parseLongLong(const QJsonObject& object, const QString& key, long long& target) {
             if (object.contains(key)) target = object[key].toVariant().toLongLong();
+        }
+
+        void parseInt(const QJsonObject& object, const QString& key, int& target) {
+            if (object.contains(key)) target = object[key].toVariant().toInt();
         }
 
         void parseXHTTPXmuxObject(xrayXHTTP* config, const QJsonObject& obj) {
@@ -192,8 +205,12 @@ namespace Configs {
             parseString(obj, "xPaddingPlacement", config->xPaddingPlacement);
             parseString(obj, "xPaddingMethod", config->xPaddingMethod);
             parseString(obj, "uplinkHTTPMethod", config->uplinkHTTPMethod);
-            parseString(obj, "sessionPlacement", config->sessionPlacement);
-            parseString(obj, "sessionKey", config->sessionKey);
+            parseString(obj, "sessionPlacement", config->sessionIDPlacement); // legacy alias (pre-v26.6.22 Xray)
+            parseString(obj, "sessionIDPlacement", config->sessionIDPlacement);
+            parseString(obj, "sessionKey", config->sessionIDKey); // legacy alias (pre-v26.6.22 Xray)
+            parseString(obj, "sessionIDKey", config->sessionIDKey);
+            parseString(obj, "sessionIDTable", config->sessionIDTable);
+            parseVariantString(obj, "sessionIDLength", config->sessionIDLength);
             parseString(obj, "seqPlacement", config->seqPlacement);
             parseString(obj, "seqKey", config->seqKey);
             parseString(obj, "uplinkDataPlacement", config->uplinkDataPlacement);
@@ -203,9 +220,9 @@ namespace Configs {
             parseBool(obj, "noSSEHeader", config->noSSEHeader);
             parseVariantString(obj, "scMaxEachPostBytes", config->scMaxEachPostBytes);
             parseVariantString(obj, "scMinPostsIntervalMs", config->scMinPostsIntervalMs);
-            parseVariantString(obj, "scMaxBufferedPosts", config->scMaxBufferedPosts);
+            parseLongLong(obj, "scMaxBufferedPosts", config->scMaxBufferedPosts);
             parseVariantString(obj, "scStreamUpServerSecs", config->scStreamUpServerSecs);
-            parseVariantString(obj, "serverMaxHeaderBytes", config->serverMaxHeaderBytes);
+            parseInt(obj, "serverMaxHeaderBytes", config->serverMaxHeaderBytes);
             if (obj.contains("downloadSettings")) {
                 if (obj["downloadSettings"].isObject()) {
                     config->downloadSettings = QJsonObject2QString(obj["downloadSettings"].toObject(), true);
@@ -477,8 +494,10 @@ namespace Configs {
         exportString(extraObj, "xPaddingPlacement", xPaddingPlacement);
         exportString(extraObj, "xPaddingMethod", xPaddingMethod);
         exportString(extraObj, "uplinkHTTPMethod", uplinkHTTPMethod);
-        exportString(extraObj, "sessionPlacement", sessionPlacement);
-        exportString(extraObj, "sessionKey", sessionKey);
+        exportString(extraObj, "sessionIDPlacement", sessionIDPlacement);
+        exportString(extraObj, "sessionIDKey", sessionIDKey);
+        exportString(extraObj, "sessionIDTable", sessionIDTable);
+        exportString(extraObj, "sessionIDLength", sessionIDLength);
         exportString(extraObj, "seqPlacement", seqPlacement);
         exportString(extraObj, "seqKey", seqKey);
         exportString(extraObj, "uplinkDataPlacement", uplinkDataPlacement);
@@ -488,9 +507,9 @@ namespace Configs {
         exportBool(extraObj, "noSSEHeader", noSSEHeader);
         exportString(extraObj, "scMaxEachPostBytes", scMaxEachPostBytes);
         exportString(extraObj, "scMinPostsIntervalMs", scMinPostsIntervalMs);
-        exportString(extraObj, "scMaxBufferedPosts", scMaxBufferedPosts);
+        exportLongLong(extraObj, "scMaxBufferedPosts", scMaxBufferedPosts);
         exportString(extraObj, "scStreamUpServerSecs", scStreamUpServerSecs);
-        exportString(extraObj, "serverMaxHeaderBytes", serverMaxHeaderBytes);
+        exportInt(extraObj, "serverMaxHeaderBytes", serverMaxHeaderBytes);
         if (mode == "stream-one") {
             extraObj.remove("downloadSettings");
         } else if (!downloadSettings.isEmpty()) {

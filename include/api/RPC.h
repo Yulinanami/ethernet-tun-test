@@ -38,11 +38,16 @@ namespace API {
 
         QString SetSystemDNS(bool *rpcOK, bool clear) const;
 
-        [[nodiscard]] libcore::ListConnectionsResp ListConnections() const;
+        [[nodiscard]] libcore::QueryConnectionsResp QueryConnections() const;
 
-        QString CheckConfig(bool *rpcOK, const QString& config) const;
+        // isXray selects the validating core: false (default) validates a
+        // sing-box config, true validates an Xray-format config.
+        QString CheckConfig(bool *rpcOK, const QString& config, bool isXray = false) const;
 
         bool IsPrivileged(bool *rpcOK) const;
+
+        // Physical default-route interface name (empty on failure / no route).
+        QString GetDefaultInterface(bool *rpcOK) const;
 
         libcore::SpeedTestResponse SpeedTest(bool *rpcOK, const libcore::SpeedTestRequest &request);
 

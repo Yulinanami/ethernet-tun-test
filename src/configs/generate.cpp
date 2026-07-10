@@ -25,6 +25,43 @@ namespace {
             [](const auto& e, std::string_view k) { return e.first < k; });
         return (it != ruleSetList.end() && it->first == key) ? it->second : std::string_view{};
     }
+
+    QJsonArray bindXrayOutboundsToInterface(const QJsonArray &outbounds, const QString &iface) {
+        auto targetsLoopback = [](const QJsonObject &out) {
+            auto settings = out["settings"].toObject();
+            QString addr;
+            if (settings.contains("vnext")) addr = settings["vnext"].toArray().first().toObject()["address"].toString();
+            else if (settings.contains("servers")) addr = settings["servers"].toArray().first().toObject()["address"].toString();
+            else if (settings.contains("address")) addr = settings["address"].toString();
+            return addr == "localhost" || addr == "::1" || addr.startsWith("127.");
+        };
+        QJsonArray result;
+        for (const auto &v : outbounds) {
+            auto out = v.toObject();
+            const auto protocol = out["protocol"].toString();
+            if (protocol == "blackhole" || protocol == "dns" || protocol == "loopback" || targetsLoopback(out)) {
+                result.append(out);
+                continue;
+            }
+            auto streamSettings = out["streamSettings"].toObject();
+            auto sockopt = streamSettings["sockopt"].toObject();
+            sockopt["interface"] = iface;
+            const auto network = streamSettings["network"].toString();
+            if (network == "xhttp" || network == "splithttp") {
+                auto xhttpSettings = streamSettings["xhttpSettings"].toObject();
+                if (xhttpSettings.isEmpty()) xhttpSettings = streamSettings["splithttpSettings"].toObject();
+                if (xhttpSettings["extra"].toObject().contains("downloadSettings")) {
+                    // XHTTP's download leg gets its own stream config; penetrate
+                    // makes Xray copy this sockopt (interface bind included) onto it.
+                    sockopt["penetrate"] = true;
+                }
+            }
+            streamSettings["sockopt"] = sockopt;
+            out["streamSettings"] = streamSettings;
+            result.append(out);
+        }
+        return result;
+    }
 }
 
 namespace Configs {
@@ -112,6 +149,8 @@ namespace Configs {
         peer->public_key = dataManager->settingsRepo->warp_public_key;
         peer->address = outbound->server;
         peer->port = outbound->server_port;
+        peer->reserved = QStringList2QListInt(dataManager->settingsRepo->warp_reserved);
+        peer->persistent_keepalive = 10;
         outbound->peer = peer;
         outbound->mtu = 1280;
 
@@ -126,6 +165,19 @@ namespace Configs {
         {
             ctx->isResolvedUsed = isSystemdResolvedDefaultResolver();
         }
+        // Resolve the physical default-route interface once per real build. When
+        // Xray is the final egress under TUN we bind its egress socket directly
+        // to this interface (streamSettings.sockopt.interface) instead of
+        // detouring through a sing-box socks loopback bridge. Skipped for
+        // test/export builds (an export must stay machine-portable) and when TUN
+        // is off (no loop to prevent). On any RPC failure defaultInterface stays
+        // empty and the build falls back to the loopback bridge.
+        if (ctx->tunEnabled)
+        {
+            bool ifcOK = false;
+            auto ifc = API::defaultClient->GetDefaultInterface(&ifcOK);
+            if (ifcOK && !ifc.isEmpty()) ctx->defaultInterface = ifc;
+        }
         auto preReqs = ctx->buildPrerequisities;
         
         // Get route chain
@@ -135,12 +187,28 @@ namespace Configs {
             return;
         }
 
+        // Warp is enabled but its config was never generated: getWarpProfile()
+        // would build a wireguard outbound from empty keys/endpoint/addresses,
+        // which fails silently downstream. Break the flow early and tell the
+        // user to generate the warp config first.
+        if (dataManager->settingsRepo->enable_warp &&
+            (dataManager->settingsRepo->warp_private_key.isEmpty() ||
+             dataManager->settingsRepo->warp_public_key.isEmpty() ||
+             dataManager->settingsRepo->warp_ep.isEmpty() ||
+             dataManager->settingsRepo->warp_ifc_addrs.isEmpty())) {
+            ctx->error = "Warp is enabled but its config has not been generated. Please generate the Warp config first in Routing Settings.";
+            return;
+        }
+
         // Routing dependencies
         auto neededOutbounds = routeChain->get_used_outbounds();
         auto neededRuleSets = routeChain->get_used_rule_sets();
         preReqs->routingDeps->defaultOutboundID = routeChain->defaultOutboundID;
         preReqs->routingDeps->outboundMap[-1] = "proxy";
         preReqs->routingDeps->outboundMap[-2] = "direct";
+        // warp-bypass resolves to the real proxy outbound: when warp is on it's the
+        // outbound warp detours into (tagged "warp-bypass"); when off it's just "proxy".
+        preReqs->routingDeps->outboundMap[warpBypassID] = dataManager->settingsRepo->enable_warp ? "warp-bypass" : "proxy";
         int suffix = 0;
         auto isCustomFullConfig = [](const std::shared_ptr<Profile>& p) {
             return p->type == "custom" && p->Custom() != nullptr && p->Custom()->type == Custom::CustomFullConfig;
@@ -355,6 +423,16 @@ namespace Configs {
             ntpObj["server"] = Configs::dataManager->settingsRepo->ntp_server_address;
             ntpObj["server_port"] = Configs::dataManager->settingsRepo->ntp_server_port;
             ntpObj["interval"] = Configs::dataManager->settingsRepo->ntp_interval;
+            // Send the NTP query through the chosen outbound. Only "direct" and
+            // "proxy" are offered; both tags always exist in the live config.
+            // The test config has no single "proxy" outbound (each tested
+            // profile is tagged "proxy-N-0"), so force "direct" there to keep
+            // it valid.
+            const QString ntpDetour =
+                (Configs::dataManager->settingsRepo->ntp_outbound == "proxy" && !ctx->forTest)
+                    ? "proxy"
+                    : "direct";
+            ntpObj["detour"] = ntpDetour;
             ctx->buildConfigResult->coreConfig["ntp"] = ntpObj;
         }
     }
@@ -517,23 +595,23 @@ namespace Configs {
                     {"domain", "localhost"},
                     {"action", "predefined"},
                     {"query_type", "AAAA"},
-                    {"rcode", "NOERROR"},
-                    {"answer", "localhost. IN AAAA ::1"},
+                    {"rcode", "NXDOMAIN"},
                 };
         }
 
-        if (!ctx->forTest)
+        // process_path matching forces sing-box's process finder, which is very
+        // heavy on Windows (large latency spikes). It's only needed to keep an
+        // extra core's egress out of the proxy/TUN loop — sing-box's own egress
+        // is handled by auto_detect_interface and xray by its loopback bridges —
+        // so only emit the direct-DNS carve-out when an extra core is present.
+        if (!ctx->forTest && !ctx->buildConfigResult->extraCoreData->path.isEmpty())
         {
             QJsonArray coreProcessPaths;
-            coreProcessPaths.append(FindCoreRealPath());
-            if (!ctx->buildConfigResult->extraCoreData->path.isEmpty())
-            {
-                auto extraCorePath = ctx->buildConfigResult->extraCoreData->path;
+            auto extraCorePath = ctx->buildConfigResult->extraCoreData->path;
 #ifdef Q_OS_WIN
-                extraCorePath.replace("/", "\\");
+            extraCorePath.replace("/", "\\");
 #endif
-                coreProcessPaths.append(extraCorePath);
-            }
+            coreProcessPaths.append(extraCorePath);
             rules += QJsonObject{
                 {"process_path", coreProcessPaths},
                 {"action", "route"},
@@ -683,7 +761,6 @@ namespace Configs {
             inboundObj["mtu"] = Configs::dataManager->settingsRepo->vpn_mtu;
             inboundObj["stack"] = Configs::dataManager->settingsRepo->vpn_implementation;
             inboundObj["strict_route"] = Configs::dataManager->settingsRepo->vpn_strict_route;
-            if (ctx->os == Linux) inboundObj["auto_redirect"] = true;
             const auto tunIPv4CIDR = Configs::dataManager->settingsRepo->vpn_tun_ipv4_cidr;
             const auto tunIPv6CIDR = Configs::dataManager->settingsRepo->vpn_tun_ipv6_cidr;
             ctx->buildConfigResult->tunIPv4CIDR = tunIPv4CIDR;
@@ -691,7 +768,11 @@ namespace Configs {
             if (Configs::dataManager->settingsRepo->vpn_ipv6) tunAddress += tunIPv6CIDR;
             inboundObj["address"] = tunAddress;
 
-            QJsonArray routeExcludeAddrs = {"127.0.0.0/8"};
+            QJsonArray routeExcludeAddrs;
+            if (!Configs::dataManager->settingsRepo->disable_private_range_bypass) routeExcludeAddrs = {
+                "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4",
+                "255.255.255.255/32"
+            };
             QJsonArray routeExcludeSets;
             if (Configs::dataManager->settingsRepo->enable_tun_routing)
             {
@@ -859,13 +940,17 @@ namespace Configs {
         return {entID};
     }
 
-    void buildSingboxChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, QList<std::shared_ptr<Profile>> &ents, const QString& prefix, bool includeProxy, bool link, int startSuffix = 0, bool markIngress = false) {
+    void buildSingboxChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, QList<std::shared_ptr<Profile>> &ents, const QString& prefix, bool includeProxy, bool link, int startSuffix = 0, bool markIngress = false, bool warpWrap = false) {
         for (int idx = 0; idx < ents.size(); idx++)
         {
             auto tag = prefix + "-" + Int2String(startSuffix + idx);
             QString nextTag;
             if (idx < ents.size() - 1) nextTag = prefix + "-" + Int2String(startSuffix + idx + 1);
             if (includeProxy && idx == 0) tag = "proxy";
+            // warp wrapping: idx 0 is warp (tag "proxy") and idx 1 is the outbound it
+            // detours into. Expose that outbound under the stable tag "warp-bypass" so
+            // rules / final can reach the real proxy without the warp layer.
+            if (warpWrap && idx == 1) tag = "warp-bypass";
             if (markIngress && idx == 0) ctx->singIngressTags << tag;
             const auto& ent = ents[idx];
             auto [object, error] = ent->outbound->Build();
@@ -876,6 +961,7 @@ namespace Configs {
             }
             object["tag"] = tag;
             if (!nextTag.isEmpty() && link) object["detour"] = nextTag;
+            if (warpWrap && idx == 0) object["detour"] = "warp-bypass";
             if (ent->outbound->IsEndpoint())
             {
                 ctx->endpoints.append(object);
@@ -919,6 +1005,28 @@ namespace Configs {
                     }
                 }
             }
+            if (!bridgeConfig.bindInterface.isEmpty() && idx == ents.size() - 1) {
+                // Final egress hop under TUN: bind its physical socket to the
+                // default interface so it doesn't re-enter TUN. Inner hops dial
+                // through this one via proxySettings and open no socket of their
+                // own, so only the last hop needs the sockopt.
+                auto streamSettings = object["streamSettings"].toObject();
+                auto sockopt = streamSettings["sockopt"].toObject();
+                sockopt["interface"] = bridgeConfig.bindInterface;
+                const auto network = streamSettings["network"].toString();
+                if (network == "xhttp" || network == "splithttp") {
+                    auto xhttpSettings = streamSettings["xhttpSettings"].toObject();
+                    if (xhttpSettings.isEmpty()) xhttpSettings = streamSettings["splithttpSettings"].toObject();
+                    if (xhttpSettings["extra"].toObject().contains("downloadSettings")) {
+                        // XHTTP's download leg gets its own stream config;
+                        // penetrate makes Xray copy this sockopt (including the
+                        // interface bind) onto it too.
+                        sockopt["penetrate"] = true;
+                    }
+                }
+                streamSettings["sockopt"] = sockopt;
+                object["streamSettings"] = streamSettings;
+            }
             // A bridge always requires chaining the preceding hop into it,
             // even when `link` is false (single-hop route groups). nextTag
             // already encodes whether anything follows, so honoring it
@@ -946,7 +1054,7 @@ namespace Configs {
         }
     }
 
-    void buildOutboundChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, const QList<int>& entIDs, const QString& prefix, bool includeProxy, bool link, int singToXrayPort = -1, int xrayToSingPort = -1, int startSuffix = 0)
+    void buildOutboundChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, const QList<int>& entIDs, const QString& prefix, bool includeProxy, bool link, int singToXrayPort = -1, int xrayToSingPort = -1, int startSuffix = 0, bool warpWrap = false)
     {
         // Core-transition flags are per-chain: entIDListtoEntList only ever
         // sets them true, so clear any value left by a previous chain in this
@@ -992,9 +1100,21 @@ namespace Configs {
                             {"pass", custom->bridgeAuth}
                         }
                     }}
+                }},
+                {"sniffing", QJsonObject{
+                    {"enabled", true},
+                    {"destOverride", QJsonArray{"http", "tls", "quic"}},
+                    {"routeOnly", false}
                 }}
             });
             userXrayConfig["inbounds"] = inbounds;
+
+            if (!ctx->defaultInterface.isEmpty()) {
+                userXrayConfig["outbounds"] = bindXrayOutboundsToInterface(userXrayConfig["outbounds"].toArray(), ctx->defaultInterface);
+                MW_show_log("[interface-bind] custom Xray full config egress bound to default interface " + ctx->defaultInterface);
+                if (!ctx->forTest) ctx->buildConfigResult->boundInterface = ctx->defaultInterface;
+            }
+
             ctx->buildConfigResult->xrayConfig = userXrayConfig;
             ctx->buildConfigResult->isXrayNeeded = true;
         }
@@ -1023,26 +1143,22 @@ namespace Configs {
             socksOutbound->server_port = singToXrayBridgeConf.port;
             initialSingEnts << bridgeEnt;
         }
-        // Xray-final-egress under TUN: detour xray's egress back through a
-        // sing-box socks inbound that routes to `direct`. Without this, when
-        // xray (running in the same process as sing-box) dials the internet
-        // its packets re-enter TUN — sing-box's process_path rule should
-        // short-circuit them to direct but in practice doesn't always match,
-        // producing a TUN -> xray -> TUN loop. Sing-box's direct outbound
-        // honors auto_detect_interface, so handing xray's egress to it bypasses
-        // TUN cleanly. Mutually exclusive with xrayToSingTransitioned (which
-        // implies a tailing sing-box hop already exists).
-        bool xrayFinalEgressLoopback = !xrayEnts.isEmpty() && tailingSingEnts.isEmpty() && ctx->tunEnabled && !ctx->xrayToSingTransitioned;
+        bool xrayFinalEgress = !xrayEnts.isEmpty() && tailingSingEnts.isEmpty() && !ctx->xrayToSingTransitioned;
         coreBridgeConfig xrayToSingBridgeConf;
         if (ctx->xrayToSingTransitioned) {
             xrayToSingBridgeConf = {true, xrayToSingPort == -1 ? ports[1] : xrayToSingPort, GetRandomString(32), false, GenRandomLoopback()};
             ctx->xrayToSingBridges << xrayToSingBridgeConf;
-        } else if (xrayFinalEgressLoopback) {
+        } else if (xrayFinalEgress && !ctx->defaultInterface.isEmpty()) {
+            xrayToSingBridgeConf = {};
+            xrayToSingBridgeConf.bindInterface = ctx->defaultInterface;
+            MW_show_log("[interface-bind] " + prefix + " xray egress bound to default interface " + ctx->defaultInterface);
+            if (!ctx->forTest) ctx->buildConfigResult->boundInterface = ctx->defaultInterface;
+        } else if (xrayFinalEgress && ctx->tunEnabled) {
             xrayToSingBridgeConf = {true, xrayToSingPort == -1 ? ports[1] : xrayToSingPort, GetRandomString(32), true, GenRandomLoopback()};
             ctx->xrayToSingBridges << xrayToSingBridgeConf;
         }
         if (!initialSingEnts.isEmpty()) {
-            buildSingboxChain(ctx, initialSingEnts, prefix, includeProxy, link, startSuffix);
+            buildSingboxChain(ctx, initialSingEnts, prefix, includeProxy, link, startSuffix, false, warpWrap);
         }
         if (!xrayEnts.isEmpty()) {
             buildXrayChain(ctx, xrayEnts, prefix, includeProxy, link, startSuffix, xrayToSingBridgeConf);
@@ -1051,14 +1167,6 @@ namespace Configs {
             buildSingboxChain(ctx, tailingSingEnts, prefix, false, link, startSuffix + initialSingEnts.size(), true);
         }
 
-        // Traffic group: watchTag is the matched outbound of the last routing
-        // rule that points into this chain on the sing-box side. With no xray
-        // re-entry that's the first hop of initialSingEnts; with an xray->sing
-        // re-entry (interlocking [sing,xray,sing] pattern) the bridge inbound's
-        // route rule sends traffic to the first hop of tailingSingEnts and that
-        // becomes the egress-side watch point. profiles is the original user
-        // chain — synthetic socks bridges are appended to initialSingEnts above
-        // but never enter `ents`, so they're naturally excluded.
         if (!ents.isEmpty()) {
             TrafficChainGroup group;
             group.profiles = ents;
@@ -1097,14 +1205,12 @@ namespace Configs {
             entIDs.append(ctx->ent->id);
         }
         if (group->front_proxy_id >= 0) entIDs.append(group->front_proxy_id);
-        if (dataManager->settingsRepo->enable_warp) {
+        const bool warpWrap = dataManager->settingsRepo->enable_warp;
+        if (warpWrap) {
             entIDs.prepend(warpProfileID);
         }
-        buildOutboundChain(ctx, entIDs, "config", true, true);
+        buildOutboundChain(ctx, entIDs, "config", true, true, -1, -1, 0, warpWrap);
 
-        // A chain-typed profile wrapper isn't in entIDs (only its hops are),
-        // so the chainGroup just built doesn't include it. Add it so the
-        // chain's row in the proxy list also accumulates traffic.
         if (ctx->ent->type == "chain" && !ctx->buildConfigResult->chainGroups.isEmpty()) {
             ctx->buildConfigResult->chainGroups.last().profiles.append(ctx->ent);
         }
@@ -1114,18 +1220,12 @@ namespace Configs {
         for (const auto& routeGroup : ctx->buildPrerequisities->routingDeps->routeOutboundGroups) {
             bool linked = routeGroup.hopIDs.size() > 1;
             buildOutboundChain(ctx, routeGroup.hopIDs, "route", false, linked, -1, -1, routeSuffix);
-            // Same as main chain: credit the chain wrapper if the route rule's
-            // referenced outbound was a chain.
             if (routeGroup.chainWrapper != nullptr && !ctx->buildConfigResult->chainGroups.isEmpty()) {
                 ctx->buildConfigResult->chainGroups.last().profiles.append(routeGroup.chainWrapper);
             }
             routeSuffix += routeGroup.hopIDs.size();
         }
 
-        // Also add the needed socks inbound bridges. Loopback-protect bridges
-        // have no sing-box ingress to pair with (their inbound routes straight
-        // to the hidden `xray-direct`), so the singIngressTags index only
-        // advances for normal xray->sing bridges.
         int loopbackBridgeCount = 0;
         for (const auto& b : ctx->xrayToSingBridges) if (b.loopbackProtect) loopbackBridgeCount++;
         if (ctx->xrayToSingBridges.size() - loopbackBridgeCount != ctx->singIngressTags.size()) {
@@ -1183,76 +1283,73 @@ namespace Configs {
         routeChain = std::make_shared<RouteProfile>(*routeChain);
         auto routeDeps = ctx->buildPrerequisities->routingDeps;
 
-        // hijack
-        if (Configs::dataManager->settingsRepo->enable_dns_server && !ctx->forTest)
-        {
-            auto sniffRule = std::make_shared<RouteRule>();
-            sniffRule->action = "sniff";
-            sniffRule->inbound = {"hijack-dns"};
-
-            auto redirRule = std::make_shared<RouteRule>();
-            redirRule->action = "hijack-dns";
-            redirRule->inbound = {"hijack-dns"};
-
-            routeChain->Rules.prepend(redirRule);
-            routeChain->Rules.prepend(sniffRule);
-        }
-        if (Configs::dataManager->settingsRepo->enable_redirect && !ctx->forTest) {
-            auto sniffRule = std::make_shared<RouteRule>();
-            sniffRule->action = "sniff";
-            sniffRule->sniffOverrideDest = true;
-            sniffRule->inbound = {"hijack"};
-            routeChain->Rules.prepend(sniffRule);
+        QJsonObject rawRouteObj;
+        if (routeChain->isRaw) {
+            rawRouteObj = QString2QJsonObject(routeChain->rawRoute);
+            if (rawRouteObj.isEmpty()) {
+                ctx->error = "Raw routing profile is not a valid JSON object";
+                return;
+            }
+            rawRouteObj = RouteProfile::TranslateRawOutbounds(rawRouteObj, routeDeps->outboundMap);
+            if (routeChain->preventModifications) {
+                ctx->buildConfigResult->coreConfig["route"] = rawRouteObj;
+                return;
+            }
         }
 
-        // sniff and resolve
-        if (!Configs::dataManager->settingsRepo->resolve_domain_strategy.isEmpty())
-        {
-            auto resolveRule = std::make_shared<RouteRule>();
-            resolveRule->action = "resolve";
-            resolveRule->strategy = Configs::dataManager->settingsRepo->resolve_domain_strategy;
-            resolveRule->inbound = {"mixed-in", "tun-in"};
-            routeChain->Rules.prepend(resolveRule);
+        struct InjectedRules {
+            QJsonObject sniff;
+            QJsonObject resolve;
+            QJsonObject dnsHijack;
+            QJsonObject dnsInReject;
+            QJsonObject redirectSniff;
+        } injected;
+
+        if (!routeChain->isRaw) {
+            injected.sniff = QJsonObject{{"action", "sniff"}};
+            if (!Configs::dataManager->settingsRepo->resolve_domain_strategy.isEmpty()) {
+                injected.resolve = QJsonObject{
+                    {"inbound", QJsonArray{"mixed-in", "tun-in"}},
+                    {"action", "resolve"},
+                    {"strategy", Configs::dataManager->settingsRepo->resolve_domain_strategy},
+                };
+            }
+            injected.dnsHijack = QJsonObject{
+                {"protocol", "dns"},
+                {"action", "hijack-dns"},
+            };
+            if (Configs::dataManager->settingsRepo->enable_redirect && !ctx->forTest) {
+                injected.redirectSniff = QJsonObject{
+                    {"inbound", QJsonArray{"hijack"}},
+                    {"action", "sniff"},
+                    {"override_destination", true},
+                };
+            }
         }
-        if (Configs::dataManager->settingsRepo->sniffing_mode != SniffingMode::DISABLE)
-        {
-            auto sniffRule = std::make_shared<RouteRule>();
-            sniffRule->action = "sniff";
-            sniffRule->inbound = {"mixed-in", "tun-in"};
-            routeChain->Rules.prepend(sniffRule);
+        if (!ctx->forTest) {
+            injected.dnsInReject = QJsonObject{
+                {"inbound", "dns-in"},
+                {"action", "reject"},
+            };
         }
 
-        // rules
-        auto routeRules = routeChain->get_route_rules(false, routeDeps->outboundMap);
-        QJsonArray coreProcessPaths;
-        coreProcessPaths.append(FindCoreRealPath());
+        auto profileRules = routeChain->isRaw ? rawRouteObj.value("rules").toArray()
+                                              : routeChain->get_route_rules(false, routeDeps->outboundMap);
+
+        QJsonObject extraCoreDirect;
         if (!ctx->buildConfigResult->extraCoreData->path.isEmpty())
         {
+            QJsonArray coreProcessPaths;
             auto extraCorePath = ctx->buildConfigResult->extraCoreData->path;
 #ifdef Q_OS_WIN
             extraCorePath.replace("/", "\\");
 #endif
             coreProcessPaths.append(extraCorePath);
-        }
-        routeRules.prepend(QJsonObject{
-            {"action", "route"},
-            {"process_path", coreProcessPaths},
-            {"outbound", "direct"},
-        });
-        if (!ctx->forTest) {
-            routeRules.prepend(QJsonObject{
-                {"inbound", "dns-in"},
-                {"action", "reject"},
-            });
-            routeRules.prepend(QJsonObject{
-            {"action", "hijack-dns"},
-            {"protocol", "dns"},
-            {"inbound", "dns-in"},
-            });
-            routeRules.prepend(QJsonObject{
-                {"action", "sniff"},
-                {"inbound", "dns-in"},
-            });
+            extraCoreDirect = QJsonObject{
+                {"action", "route"},
+                {"process_path", coreProcessPaths},
+                {"outbound", "direct"},
+            };
         }
 
         // rulesets
@@ -1287,16 +1384,13 @@ namespace Configs {
                     };
         }
 
-        // map ingress socks inbounds to their corresponding outbounds.
-        // Loopback-protect bridges route to hidden `xray-direct`
-        // (auto_detect_interface bypasses TUN); normal bridges route to the
-        // paired sing-box ingress.
         int routeLoopbackBridgeCount = 0;
         for (const auto& b : ctx->xrayToSingBridges) if (b.loopbackProtect) routeLoopbackBridgeCount++;
         if (ctx->xrayToSingBridges.size() - routeLoopbackBridgeCount != ctx->singIngressTags.size()) {
             ctx->error = "xray to sing-box bridges count does not match ingress tags count";
             return;
         }
+        QJsonArray bridgeRules;
         int routeSingIngressIdx = 0;
         for (auto idx = 0; idx < ctx->xrayToSingBridges.size(); idx++) {
             auto bridgeConf = ctx->xrayToSingBridges[idx];
@@ -1309,24 +1403,53 @@ namespace Configs {
                 outboundTag = ctx->singIngressTags[routeSingIngressIdx];
                 routeSingIngressIdx++;
             }
-            QJsonObject rule = {
+            bridgeRules.append(QJsonObject{
                 {"inbound", inboundTag},
                 {"action", "route"},
                 {"outbound", outboundTag},
-            };
-            routeRules.prepend(rule);
+            });
+        }
+
+        // raw profiles bring their own rule_set definitions; merge them after ours.
+        if (routeChain->isRaw) {
+            for (const auto& rs : rawRouteObj.value("rule_set").toArray()) ruleSetArray.append(rs);
         }
 
         // apply
-        QJsonObject route;
+        const int defOut = routeChain->defaultOutboundID;
+
+        QJsonArray routeRules;
+        for (const auto& r : bridgeRules) routeRules.append(r);
+        if (!extraCoreDirect.isEmpty()) routeRules.append(extraCoreDirect);
+        auto appendIfSet = [&routeRules](const QJsonObject& r) { if (!r.isEmpty()) routeRules.append(r); };
+        appendIfSet(injected.sniff);
+        appendIfSet(injected.resolve);
+        appendIfSet(injected.dnsHijack);
+        appendIfSet(injected.dnsInReject);
+        appendIfSet(injected.redirectSniff);
+        for (const auto& r : profileRules) routeRules.append(r);
+        if (!routeChain->isRaw && defOut == blockID) {
+            routeRules.append(QJsonObject{{"action", "reject"}});
+        }
+
+        QJsonObject route = routeChain->isRaw ? rawRouteObj : QJsonObject{};
         route["rules"] = routeRules;
         route["rule_set"] = ruleSetArray;
-        route["final"] = outboundIDToString(routeChain->defaultOutboundID);
-        if (Configs::dataManager->settingsRepo->enable_stats)  route["find_process"] = true;
-        route["default_domain_resolver"] = QJsonObject{
-                                {"server", "dns-direct"},
-                                {"strategy", Configs::dataManager->settingsRepo->default_domain_strategy}};
-        if (Configs::dataManager->settingsRepo->spmode_vpn) route["auto_detect_interface"] = true;
+        if (routeChain->isRaw) {
+            if (!route.contains("final")) route["final"] = "proxy"; // user's final, else a safe default
+        } else if (defOut == blockID) {
+            route["final"] = "direct";
+        } else if (defOut == warpBypassID) {
+            route["final"] = dataManager->settingsRepo->enable_warp ? "warp-bypass" : "proxy";
+        } else {
+            route["final"] = outboundIDToString(defOut);
+        }
+        if (Configs::dataManager->settingsRepo->enable_stats && !route.contains("find_process"))  route["find_process"] = true;
+        if (!route.contains("default_domain_resolver"))
+            route["default_domain_resolver"] = QJsonObject{
+                                    {"server", "dns-direct"},
+                                    {"strategy", Configs::dataManager->settingsRepo->default_domain_strategy}};
+        if (Configs::dataManager->settingsRepo->spmode_vpn && !route.contains("auto_detect_interface")) route["auto_detect_interface"] = true;
 
         ctx->buildConfigResult->coreConfig["route"] = route;
     }
@@ -1449,7 +1572,7 @@ namespace Configs {
         };
     }
 
-    std::shared_ptr<BuildConfigResult> BuildSingBoxConfig(const std::shared_ptr<Profile>& ent) {
+    std::shared_ptr<BuildConfigResult> BuildSingBoxConfig(const std::shared_ptr<Profile>& ent, bool forExport) {
         if (ent->type == "custom")
         {
             auto res = std::make_shared<BuildConfigResult>();
@@ -1468,6 +1591,7 @@ namespace Configs {
 
         auto ctx = std::make_shared<BuildSingBoxConfigContext>();
         ctx->ent = ent;
+        ctx->forExport = forExport;
 
         CalculatePrerequisities(ctx);
 
@@ -1579,6 +1703,34 @@ namespace Configs {
                 return true;
             }
         }
+        // Xray profiles (native Xray outbounds and custom Xray outbounds) carry
+        // an Xray-format outbound that sing-box can't parse — its sing-box
+        // Build() is only a dummy placeholder. Validate the real outbound via
+        // the Xray core instead. Custom full configs never reach here (handled
+        // above), so IsXray() cleanly selects the Xray-validation path.
+        if (!fullConf && ent->outbound->IsXray())
+        {
+            auto [out, err] = ent->outbound->BuildXray();
+            if (!err.isEmpty())
+            {
+                MW_show_log("Invalid Xray ent " + ent->outbound->name + ": " + err);
+                return false;
+            }
+            QJsonObject xrayConf{
+                {"outbounds", QJsonArray{out}},
+            };
+            bool ok;
+            auto resp = API::defaultClient->CheckConfig(&ok, QJsonObject2QString(xrayConf, true), true);
+            if (!ok)
+            {
+                MW_show_log("Failed to Call the Core: " + resp);
+                return false;
+            }
+            if (resp.isEmpty()) return true;
+            // else
+            MW_show_log("Invalid Xray ent " + ent->outbound->name + ": " + resp);
+            return false;
+        }
         if (!fullConf)
         {
             auto out = ent->outbound->Build();
@@ -1607,11 +1759,23 @@ namespace Configs {
         auto res = std::make_shared<BuildTestConfigResult>();
         auto ctx = std::make_shared<BuildSingBoxConfigContext>();
         ctx->forTest = true;
+        // Always bind a test's xray egress to the physical default interface so a
+        // result never depends on the live TUN state: if a profile is running with
+        // TUN, its TUN owns the default route and would otherwise capture and
+        // re-proxy the test; with no TUN up this is a harmless no-op (the physical
+        // NIC is already the default route). The sing-box side gets the same
+        // bypass via the test route's auto_detect_interface. On RPC failure we
+        // simply don't bind.
+        {
+            bool ifcOK = false;
+            auto ifc = API::defaultClient->GetDefaultInterface(&ifcOK);
+            if (ifcOK && !ifc.isEmpty()) ctx->defaultInterface = ifc;
+        }
         QList<int> entIDs;
         for (const auto& proxy : profiles) entIDs << proxy->id;
         ctx->buildPrerequisities->dnsDeps->directDomains = QListStr2QJsonArray(getEntDomains(entIDs, ctx->error));
         if (!ctx->buildPrerequisities->dnsDeps->directDomains.isEmpty()) ctx->buildPrerequisities->dnsDeps->needDirectDnsRules = true;
-        buildDNSSection(ctx);
+        buildDNSSection(ctx, false);
         if (!ctx->error.isEmpty())
         {
             res->error = ctx->error;

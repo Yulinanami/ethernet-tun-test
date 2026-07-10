@@ -19,11 +19,14 @@ namespace Configs {
             {"random_inbound_port",           &random_inbound_port},
             {"mux_padding",                   &mux_padding},
             {"mux_default_on",                &mux_default_on},
+            {"fragment_default_on",           &fragment_default_on},
+            {"tls_tricks_default_on",         &tls_tricks_default_on},
             {"net_use_proxy",                 &net_use_proxy},
             {"remember_enable",               &remember_enable},
             {"skip_cert",                     &skip_cert},
             {"fakedns",                       &fake_dns},
             {"disable_traffic_stats",         &disable_traffic_stats},
+            {"disable_traffic_aggregation",   &disable_traffic_aggregation},
             {"vpn_ipv6",                      &vpn_ipv6},
             {"vpn_strict_route",              &vpn_strict_route},
             {"sub_clear",                     &sub_clear},
@@ -62,6 +65,7 @@ namespace Configs {
             {"dns_disable_cache", &dns_disable_cache},
             {"dns_disable_expire", &dns_disable_expire},
             {"dns_reverse_mapping", &dns_reverse_mapping},
+            {"disable_private_range_bypass", &disable_private_range_bypass},
         };
 
         intMap = {
@@ -74,7 +78,9 @@ namespace Configs {
             {"font_size",              &font_size},
             {"max_log_line",           &max_log_line},
             {"stats_tab",              &stats_tab},
+            {"traffic_stats_retention_days", &traffic_stats_retention_days},
             {"sub_auto_update",        &sub_auto_update},
+            {"route_auto_update",      &route_auto_update},
             {"vpn_mtu",                &vpn_mtu},
             {"ntp_server_port",        &ntp_server_port},
             {"dns_server_listen_port", &dns_server_listen_port},
@@ -85,7 +91,6 @@ namespace Configs {
             {"url_test_timeout_ms",    &url_test_timeout_ms},
             {"xray_mux_concurrency",   &xray_mux_concurrency},
             {"current_route_id",       &current_route_id},
-            {"sniffing_mode",          &sniffing_mode},
             {"ruleset_mirror",         &ruleset_mirror},
             {"core_dns_in_port",       &core_dns_in_port},
             {"dns_cache_capacity", &dns_cache_capacity},
@@ -97,6 +102,9 @@ namespace Configs {
             {"inbound_address",            &inbound_address},
             {"log_level",                  &log_level},
             {"mux_protocol",               &mux_protocol},
+            {"fragment_implementation",    &fragment_implementation},
+            {"fragment_size",              &fragment_size},
+            {"fragment_sleep",             &fragment_sleep},
             {"theme",                      &theme},
             {"custom_inbound",             &custom_inbound},
             {"custom_route",               &custom_route_global},
@@ -119,12 +127,15 @@ namespace Configs {
             {"core_box_underlying_dns",    &core_box_underlying_dns},
             {"ntp_server_address",         &ntp_server_address},
             {"ntp_interval",               &ntp_interval},
+            {"ntp_outbound",               &ntp_outbound},
             {"dns_v4_resp",                &dns_v4_resp},
             {"dns_v6_resp",                &dns_v6_resp},
             {"redirect_listen_address",    &redirect_listen_address},
             {"proxy_scheme",               &proxy_scheme},
             {"main_window_geometry",       &mainWindowGeometry},
             {"xray_log_level",             &xray_log_level},
+            {"xray_geoip_url",             &xray_geoip_url},
+            {"xray_geosite_url",           &xray_geosite_url},
             {"remote_dns",                 &remote_dns},
             {"remote_dns_strategy",        &remote_dns_strategy},
             {"direct_dns",                 &direct_dns},
@@ -153,6 +164,7 @@ namespace Configs {
             {"dial_bind_ifc_history",    &dial_bind_interface_history},
             {"dial_inet4_bind_history",  &dial_inet4_bind_address_history},
             {"dial_inet6_bind_history",  &dial_inet6_bind_address_history},
+            {"warp_reserved", &warp_reserved},
         };
     }
 
@@ -201,6 +213,10 @@ namespace Configs {
                 bool ok;
                 int v = str.toInt(&ok);
                 xray_vless_preference = static_cast<Xray::XrayVlessPreference>(ok ? v : 0);
+            } else if (key == "sub_auto_update_last") {
+                sub_auto_update_last = str.toLongLong();
+            } else if (key == "route_auto_update_last") {
+                route_auto_update_last = str.toLongLong();
             }
         }
     }
@@ -209,7 +225,7 @@ namespace Configs {
         if (noSave) return;
 
         std::vector<std::pair<std::string, std::string>> keyValues;
-        keyValues.reserve(boolMap.size() + intMap.size() + stringMap.size() + stringListMap.size() + 2);
+        keyValues.reserve(boolMap.size() + intMap.size() + stringMap.size() + stringListMap.size() + 4);
 
         for (auto it = boolMap.begin(); it != boolMap.end(); ++it)
             keyValues.emplace_back(it.key().toStdString(), *it.value() ? "true" : "false");
@@ -237,6 +253,13 @@ namespace Configs {
 
         keyValues.emplace_back("xray_vless_preference",
             QString::number(static_cast<int>(xray_vless_preference)).toStdString());
+
+        // qint64 last-run timestamps for the periodic auto-update jobs (out of range for
+        // the int map, so persisted here alongside the other special cases).
+        keyValues.emplace_back("sub_auto_update_last",
+            QString::number(sub_auto_update_last).toStdString());
+        keyValues.emplace_back("route_auto_update_last",
+            QString::number(route_auto_update_last).toStdString());
 
         db.execBatchSettingsReplace(keyValues);
     }

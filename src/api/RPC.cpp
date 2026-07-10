@@ -8,12 +8,13 @@
 #include <QAtomicInt>
 #include <QMap>
 #include <QMutex>
+#include <QWaitCondition>
+#include <QDeadlineTimer>
 #include <QObject>
 #include <QThread>
 
+#include <climits>
 #include <mutex>
-#include <condition_variable>
-#include <chrono>
 #include <atomic>
 #include <exception>
 #include <memory>
@@ -51,12 +52,29 @@ namespace API {
     class Client::LocalSocketChannel {
 
         struct PendingCall {
-            std::mutex          mu;
-            std::condition_variable cv;
+            QMutex              mu;
+            QWaitCondition      cv;
             bool                done   = false;
             quint8              status = 1;     // default: error
             QByteArray          data;
         };
+
+        // QWaitCondition has no predicate+timeout overload (and unlike
+        // std::condition_variable it doesn't pull GetSystemTimePreciseAsFileTime
+        // into the import table, which breaks Win7). Block until the call
+        // completes or `ms` elapses, looping past spurious wakeups. `call.mu`
+        // must be held on entry and is still held on return.
+        static bool awaitDone(PendingCall &call, int ms) {
+            QDeadlineTimer deadline(ms);
+            while (!call.done) {
+                qint64 remaining = deadline.remainingTime();
+                if (remaining == 0) break;                  // timed out
+                call.cv.wait(&call.mu, remaining < 0
+                    ? ULONG_MAX
+                    : static_cast<unsigned long>(remaining));
+            }
+            return call.done;
+        }
 
         QThread      *io_thread;
         QObject      *io_anchor;          // stable dispatch target on io_thread
@@ -66,6 +84,8 @@ namespace API {
         QAtomicInt    next_id{1};         // monotonic across reconnects
         std::mutex    pending_mu;
         QMap<quint32, std::shared_ptr<PendingCall>> pending;
+
+        std::atomic<bool> connected_{false};
 
         static constexpr int kIOTimeoutMs = 30000;
 
@@ -77,11 +97,12 @@ namespace API {
         }
 
         void wakeAllWithError() {
+            connected_.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(pending_mu);
             for (auto &call : pending) {
-                std::lock_guard<std::mutex> cg(call->mu);
+                QMutexLocker cg(&call->mu);
                 call->done = true;
-                call->cv.notify_one();
+                call->cv.wakeOne();
             }
             pending.clear();
         }
@@ -114,11 +135,11 @@ namespace API {
                 if (call) {
                     // Hold call->mu across the notify so the cv/mutex cannot
                     // be destroyed by a waking Call() mid-notification.
-                    std::lock_guard<std::mutex> cg(call->mu);
+                    QMutexLocker cg(&call->mu);
                     call->status = status;
                     call->data   = std::move(data);
                     call->done   = true;
-                    call->cv.notify_one();
+                    call->cv.wakeOne();
                 }
             }
         }
@@ -176,12 +197,14 @@ namespace API {
                     [this]() { wakeAllWithError(); });
                 if (sock->bytesAvailable() > 0) onReadyRead();
             }, Qt::QueuedConnection);
+
+            connected_.store(true, std::memory_order_release);
         }
 
         // Returns 0 on success, non-zero on failure.
         int Call(const QString &methodName, const std::string &req,
                  std::vector<uint8_t> &rsp, int timeout_ms = 0) {
-            if (!Configs::dataManager->settingsRepo->core_running) return -1919;
+            if (!connected_.load(std::memory_order_acquire)) return -1919;
 
             const int ms = (timeout_ms > 0) ? timeout_ms : kIOTimeoutMs;
 
@@ -216,11 +239,9 @@ namespace API {
             }, Qt::QueuedConnection);
 
             // Wait for response
-            std::unique_lock<std::mutex> lock(call->mu);
-            bool ok = call->cv.wait_for(lock,
-                std::chrono::milliseconds(ms),
-                [&call] { return call->done; });
-            lock.unlock();   // never hold call->mu while taking pending_mu
+            call->mu.lock();
+            bool ok = awaitDone(*call, ms);
+            call->mu.unlock();   // never hold call->mu while taking pending_mu
 
             if (!ok) {
                 // Timed out — reclaim our slot unless processBuffer took it.
@@ -231,15 +252,13 @@ namespace API {
                 }
                 if (claimedByReader) {
                     // A response is inbound; give it a brief bounded chance.
-                    lock.lock();
-                    ok = call->cv.wait_for(lock,
-                        std::chrono::milliseconds(ms),
-                        [&call] { return call->done; });
-                    lock.unlock();
+                    call->mu.lock();
+                    ok = awaitDone(*call, ms);
+                    call->mu.unlock();
                 }
             }
 
-            std::lock_guard<std::mutex> g(call->mu);
+            QMutexLocker g(&call->mu);
             if (!ok || call->status != 0) {
                 if (ok && call->status != 0)
                     MW_show_log("[Core error] " + QString::fromUtf8(call->data));
@@ -415,23 +434,31 @@ namespace API {
         }
     }
 
-    libcore::ListConnectionsResp Client::ListConnections() const
+    libcore::QueryConnectionsResp Client::QueryConnections() const
     {
         libcore::EmptyReq request;
-        libcore::ListConnectionsResp reply;
+        libcore::QueryConnectionsResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("ListConnections", spb::pb::serialize<std::string>(request), resp);
+        auto status = channel->Call("QueryConnections", spb::pb::serialize<std::string>(request), resp);
 
         if (status == CALL_OK && tryDeserialize(resp, reply)) {
             return reply;
         }
-        if (status != CALL_OK) MW_show_log("Failed to list connections: IPC error");
+        if (status != CALL_OK) MW_show_log("Failed to query connections: IPC error");
         return {};
     }
 
-    QString Client::CheckConfig(bool* rpcOK, const QString& config) const
+    QString Client::CheckConfig(bool* rpcOK, const QString& config, bool isXray) const
     {
-        libcore::LoadConfigReq request{.core_config = config.toStdString()};
+        libcore::LoadConfigReq request;
+        if (isXray)
+        {
+            request.need_xray = true;
+            request.xray_config = config.toStdString();
+        } else
+        {
+            request.core_config = config.toStdString();
+        }
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
         auto status = channel->Call("CheckConfig", spb::pb::serialize<std::string>(request), resp);
@@ -462,6 +489,26 @@ namespace API {
         {
             NOT_OK
             return false;
+        }
+    }
+
+    QString Client::GetDefaultInterface(bool* rpcOK) const
+    {
+        libcore::EmptyReq request;
+        libcore::GetDefaultInterfaceResponse reply;
+        std::vector<uint8_t> resp;
+        // Short timeout: this feeds a synchronous config build, so a hung core
+        // must not freeze it. On any failure the caller keeps the loopback bridge.
+        auto status = channel->Call("GetDefaultInterface", spb::pb::serialize<std::string>(request), resp, 3000);
+
+        if (status == CALL_OK && tryDeserialize(resp, reply))
+        {
+            *rpcOK = true;
+            return QString::fromStdString(reply.name.value());
+        } else
+        {
+            NOT_OK
+            return "";
         }
     }
 

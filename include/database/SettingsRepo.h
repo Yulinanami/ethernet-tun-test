@@ -71,10 +71,22 @@ namespace Configs {
         int test_concurrent = 10;
         bool disable_traffic_stats = false;
         int current_group = 0; // group id
-        QString mux_protocol = "yamux";
+        QString mux_protocol = "smux";
         bool mux_padding = false;
         int mux_concurrency = 8;
         bool mux_default_on = false;
+        // TLS fragment: which implementation profiles use ("built-in" = sing-box
+        // tls.fragment, "custom" = hiddify dialer-level tls_fragment), and whether
+        // profiles left on "Keep Default" should be fragmented.
+        QString fragment_implementation = "built-in";
+        bool fragment_default_on = false;
+        // Custom (hiddify) fragment parameters, each a "min-max" range: bytes per
+        // ClientHello fragment, and milliseconds to sleep between bursts. Only the
+        // custom implementation uses these.
+        QString fragment_size = "10-100";
+        QString fragment_sleep = "2-5";
+        // TLS tricks (mixed-case SNI): default for profiles left on "Keep Default".
+        bool tls_tricks_default_on = false;
         QString theme = "0";
         int language = 0;
         QString font = "";
@@ -92,6 +104,10 @@ namespace Configs {
         QString splitter_state = "";
         bool enable_stats = true;
         int stats_tab = 0; // either connection or log
+        // Traffic-statistics module: days of hour-resolution history to retain
+        // (the 48h minute-resolution window is fixed). Clamped to >= 1 in use.
+        int traffic_stats_retention_days = 90;
+        bool disable_traffic_aggregation = false;
         int speed_test_mode = TestConfig::FULL;
         int speed_test_timeout_ms = 5000;
         QString simple_dl_url = "http://cachefly.cachefly.net/1mb.test";
@@ -111,7 +127,11 @@ namespace Configs {
 
         // Subscription
         QString user_agent = ""; // set at main.cpp
+        // Auto-update interval in minutes; sign encodes the enable checkbox (negative =
+        // disabled), magnitude is the interval (ignored if < 30). *_last is the epoch-seconds
+        // of the last auto-update sweep, used to decide when the next one is due.
         int sub_auto_update = -30;
+        qint64 sub_auto_update_last = 0;
         bool sub_clear = false;
         bool sub_send_hwid = false;
         QString sub_custom_hwid_params = "";
@@ -133,6 +153,10 @@ namespace Configs {
 
         // Routing
         int current_route_id = 1;
+        // Remote routing-profile auto-update, same sign-encoded-interval scheme as
+        // sub_auto_update (negative = disabled, magnitude = minutes). Default: daily.
+        int route_auto_update = -1440;
+        qint64 route_auto_update_last = 0;
         QString remote_dns = "8.8.8.8";
         QString remote_dns_strategy = "";
         QString direct_dns = "localhost";
@@ -147,7 +171,6 @@ namespace Configs {
         QString dns_final_out = "remote";
         QString resolve_domain_strategy = "";
         QString default_domain_strategy = "";
-        int sniffing_mode = SniffingMode::FOR_ROUTING;
         int ruleset_mirror = Mirrors::CLOUDFLARE;
 
         // Socks & HTTP Inbound
@@ -180,6 +203,7 @@ namespace Configs {
         bool vpn_strict_route = true;
 #endif
         int vpn_mtu = 1500;
+        bool disable_private_range_bypass = false;
         bool vpn_ipv6 = false;
         QString vpn_tun_ipv4_cidr = "172.19.0.1/24";
         QString vpn_tun_ipv6_cidr = "fdfe:dcba:9876::1/96";
@@ -190,6 +214,7 @@ namespace Configs {
         QString ntp_server_address = "";
         int ntp_server_port = 0;
         QString ntp_interval = "";
+        QString ntp_outbound = "direct"; // "direct" or "proxy"
 
         // Warp
         bool enable_warp = false;
@@ -197,6 +222,7 @@ namespace Configs {
         QString warp_public_key = "";
         QStringList warp_ifc_addrs = {};
         QString warp_ep = "";
+        QStringList warp_reserved = {};
 
         // Hijack
         bool enable_dns_server = false;
@@ -230,7 +256,13 @@ namespace Configs {
         QString xray_log_level = "warning";
         int xray_mux_concurrency = 8;
         bool xray_mux_default_on = false;
-        Xray::XrayVlessPreference xray_vless_preference = Xray::XhttpOnly;
+        Xray::XrayVlessPreference xray_vless_preference = Xray::XhttpAndReality;
+        // Download URLs for the Xray routing data files (geoip.dat / geosite.dat).
+        // Needed when a full Xray config's routing references geoip:/geosite: tags.
+        // Fetched on demand into GetBasePath(), which the core exposes to Xray via
+        // the XRAY_LOCATION_ASSET env var.
+        QString xray_geoip_url = "https://github.com/Loyalsoldier/v2ray-rules-dat/raw/release/geoip.dat";
+        QString xray_geosite_url = "https://github.com/Loyalsoldier/v2ray-rules-dat/raw/release/geosite.dat";
 
         // Extra Core Paths
         QStringList extraCorePaths = {};

@@ -57,6 +57,10 @@ inline QString getOSString() {
 inline QString software_name;
 inline QString software_core_name;
 
+// Epoch-seconds when the app started; set once in main(). Read by the Runtime
+// Stats panel to display Throne's uptime.
+inline qint64 appStartEpoch = 0;
+
 // MainWindow functions
 class QWidget;
 inline QWidget *mainwindow;
@@ -112,12 +116,6 @@ void Deeplink_FlushPending();
 class QThread;
 inline QThread *DS_cores;
 inline QThread *LogThread;
-
-// Timers
-
-class QTimer;
-inline QTimer *TM_auto_update_subsctiption;
-inline std::function<void(int)> TM_auto_update_subsctiption_Reset_Minute;
 
 // String
 
@@ -184,6 +182,8 @@ QList<int> QJsonArray2QListInt(const QJsonArray &arr);
 QJsonObject QMapString2QJsonObject(const QMap<QString,QString> &mp);
 
 QList<QString> QListInt2QListString(const QList<int> &list);
+
+QList<int> QStringList2QListInt(const QList<QString> &list);
 
 #define QJSONARRAY_ADD(arr, add) \
     for (const auto &a: (add)) { \

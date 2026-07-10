@@ -55,8 +55,10 @@ namespace Configs {
         QString xPaddingPlacement;
         QString xPaddingMethod;
         QString uplinkHTTPMethod;
-        QString sessionPlacement;
-        QString sessionKey;
+        QString sessionIDPlacement;
+        QString sessionIDKey;
+        QString sessionIDTable;
+        QString sessionIDLength;
         QString seqPlacement;
         QString seqKey;
         QString uplinkDataPlacement;
@@ -66,9 +68,9 @@ namespace Configs {
         bool noSSEHeader = false;
         QString scMaxEachPostBytes;
         QString scMinPostsIntervalMs;
-        QString scMaxBufferedPosts;
+        long long scMaxBufferedPosts;
         QString scStreamUpServerSecs;
-        QString serverMaxHeaderBytes;
+        int serverMaxHeaderBytes;
         // extra/xmux
         QJsonObject rawXmux;
         QString maxConcurrency;
