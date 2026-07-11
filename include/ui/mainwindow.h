@@ -360,15 +360,14 @@ private:
 
     bool m_adjustingColumns = false;
 
-    // Watches the physical default-route interface while a profile whose Xray
-    // egress is interface-bound (sockopt.interface) is running. A static bind is
-    // baked at build time. The pin (IP_UNICAST_IF) keeps working while that
-    // interface stays up, so we only rebuild+restart once the bound interface
-    // actually goes down (unplug/disconnect) — not merely because the preferred
-    // default route moved to another still-optional interface. Inactive while
-    // m_boundEgressInterface is empty (no interface-bound egress).
+    // Watches the physical default-route interface while a profile with a static
+    // egress bind is running. Rebuilds promptly when the bound link goes down or
+    // a same-name PPP/RAS interface is replaced, and slowly when the preferred
+    // default route moves to another still-up interface. Inactive while
+    // m_boundEgressInterface is empty.
     QTimer *m_defaultInterfaceWatch = nullptr;
     QString m_boundEgressInterface;
+    QString m_boundEgressFingerprint;
     int m_ifcDownStreak = 0;   // consecutive watch ticks the bound egress looked down (fast rebind)
     int m_ifcMovedStreak = 0;  // consecutive ticks the default moved off a still-up bound egress (slow rebind)
     void checkDefaultInterfaceChange();

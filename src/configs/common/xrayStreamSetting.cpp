@@ -533,7 +533,18 @@ namespace Configs {
     }
 
     BuildResult xrayXHTTP::Build() {
-        return {ExportToJson(), ""};
+        auto object = ExportToJson();
+        auto extra = object["extra"].toObject();
+        auto xmux = extra["xmux"].toObject();
+        if (!xmux.isEmpty() && !xmux.contains("hMaxRequestTimes")) {
+            // Once any XMUX field is set, Xray stops applying its complete
+            // defaults. Keep a request limit so a broken H2 client is retired
+            // instead of being reused until the profile is restarted.
+            xmux["hMaxRequestTimes"] = "600-900";
+            extra["xmux"] = xmux;
+            object["extra"] = extra;
+        }
+        return {object, ""};
     }
 
     bool xrayWS::ParseFromLink(const QString &link) {

@@ -100,8 +100,7 @@ namespace Configs
 
         QList<TrafficChainGroup> chainGroups;
 
-        // Non-empty when the Xray egress was bound to a physical interface
-        // (streamSettings.sockopt.interface) instead of the loopback bridge.
+        // Non-empty when the final egress was bound to a physical interface.
         // Drives the default-interface watch/restart while this profile runs.
         QString boundInterface;
     };
@@ -142,8 +141,7 @@ namespace Configs
         std::shared_ptr<BuildPrerequisities> buildPrerequisities = std::make_shared<BuildPrerequisities>();
         osType os;
         // Physical default-route interface name, resolved once per build via the
-        // core's GetDefaultInterface RPC (only when tunEnabled and not a
-        // test/export build). Empty => fall back to the egress loopback bridge.
+        // core's GetDefaultInterface RPC. Empty => use the existing fallback.
         QString defaultInterface;
 
         QString error;

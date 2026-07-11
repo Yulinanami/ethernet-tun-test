@@ -30,7 +30,6 @@ Icon=/opt/Throne/Throne.png
 Terminal=false
 Type=Application
 Categories=Network;Application;
-StartupWMClass=Throne
 END
 
 update-desktop-database

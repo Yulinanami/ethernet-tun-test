@@ -14,6 +14,7 @@
 #include <QFile>
 #include <QNetworkInterface>
 #include <QHostAddress>
+#include <QAbstractSocket>
 
 #include "include/configs/generate.h"
 #include "include/database/GroupsRepo.h"
@@ -705,36 +706,39 @@ bool MainWindow::set_system_dns(bool set, bool save_set) {
 }
 
 namespace {
-// An interface-bound Xray egress pins its outbound socket to a specific physical
-// interface via sockopt.interface (IP_UNICAST_IF on Windows). That pin keeps
+// An interface-bound egress pins its outbound socket to a specific physical
+// interface (IP_UNICAST_IF on Windows). That pin keeps
 // working as long as the interface itself is up with a routable address — even
 // if the OS's *preferred* default route later moves elsewhere (a second NIC
 // coming up, an automatic-metric change, Wi-Fi and Ethernet both connected).
 // So "GetDefaultInterface() now names a different interface" is NOT by itself a
-// reason to rebuild: we only need to rebind (via a restart) once the bound
-// interface has actually gone down. Restarting on every preferred-default change
-// turned benign interface churn into a restart storm — a full VPN blackout every
-// few seconds that also tore down the DNS resolvers, surfacing as lookup errors.
+// reason to rebuild immediately: we rebind promptly when the bound interface
+// goes down or a same-name PPP/RAS link gets a new index/address, and slowly when
+// another still-up interface remains preferred. This avoids restart storms while
+// still discarding sockets and persistent transports tied to an old PPP session.
 //
 // The name here is what GetDefaultInterface() returns, i.e. Go's
 // net.Interface.Name, which on Windows is the adapter friendly name and maps to
 // QNetworkInterface::humanReadableName() (name() is matched too, defensively).
-bool egressInterfaceStillUsable(const QString &name) {
-    if (name.isEmpty()) return false;
+QString egressInterfaceFingerprint(const QString &name) {
+    if (name.isEmpty()) return {};
     for (const auto &ni : QNetworkInterface::allInterfaces()) {
         if (ni.humanReadableName() != name && ni.name() != name) continue;
-        if (!ni.flags().testFlag(QNetworkInterface::IsUp)) return false;
+        if (!ni.flags().testFlag(QNetworkInterface::IsUp)) return {};
         // A disconnected/unplugged adapter keeps its row but loses its routable
         // address (drops to APIPA 169.254.x / IPv6 link-local, or nothing). Treat
         // presence of any non-loopback, non-link-local address as "still viable".
+        QStringList addresses;
         for (const auto &entry : ni.addressEntries()) {
             const QHostAddress ip = entry.ip();
-            if (ip.isNull() || ip.isLoopback() || ip.isLinkLocal()) continue;
-            return true;
+            if (ip.protocol() != QAbstractSocket::IPv4Protocol || ip.isLoopback() || ip.isLinkLocal()) continue;
+            addresses << ip.toString();
         }
-        return false;
+        if (addresses.isEmpty()) return {};
+        addresses.sort();
+        return QString::number(ni.index()) + "|" + addresses.join(',');
     }
-    return false; // no longer present -> gone
+    return {}; // no longer present -> gone
 }
 
 // The watch fires every 3s (m_defaultInterfaceWatch). Require the bound egress
@@ -742,35 +746,50 @@ bool egressInterfaceStillUsable(const QString &name) {
 // deprioritized-but-still-up for kIfcMovedTicks (~30s) before a slow rebind.
 constexpr int kIfcDownTicks = 2;
 constexpr int kIfcMovedTicks = 10;
-} // namespace
+}
 
 void MainWindow::checkDefaultInterfaceChange() {
     if (running == nullptr || m_boundEgressInterface.isEmpty()) {
         if (m_defaultInterfaceWatch) m_defaultInterfaceWatch->stop();
+        m_boundEgressFingerprint.clear();
         m_ifcDownStreak = 0;
         m_ifcMovedStreak = 0;
         return;
     }
+    const auto currentFingerprint = egressInterfaceFingerprint(m_boundEgressInterface);
+    const bool boundUsable = !currentFingerprint.isEmpty();
+    bool canCompareFingerprint = !m_boundEgressFingerprint.isEmpty();
+    if (!canCompareFingerprint && boundUsable) {
+        m_boundEgressFingerprint = currentFingerprint;
+        canCompareFingerprint = true;
+    }
+    const bool boundChanged = canCompareFingerprint && boundUsable &&
+                              currentFingerprint != m_boundEgressFingerprint;
+
     bool ok = false;
     QString cur = defaultClient->GetDefaultInterface(&ok);
-    if (!ok || cur.isEmpty() || cur == m_boundEgressInterface) {
-        // Still pinned to the preferred default (or detection unavailable): idle.
+    if (!ok || cur.isEmpty()) {
+        // Do not rebuild until there is a confirmed interface to bind to.
         m_ifcDownStreak = 0;
         m_ifcMovedStreak = 0;
         return;
-    }
-
-    // The preferred default route moved off the interface our Xray egress is
-    // pinned to. Two cases, handled at deliberately different speeds so ordinary
-    // interface churn (a second NIC appearing, an automatic-metric change, Wi-Fi
-    // and Ethernet both up) can never trigger a restart storm:
-    const bool boundUsable = egressInterfaceStillUsable(m_boundEgressInterface);
-    if (!boundUsable) {
-        // Bound interface is unplugged/disabled/gone: the pin is dead, so rebind
-        // promptly (~6s) onto the new default.
+    } else if (boundChanged || (!boundUsable &&
+                               (canCompareFingerprint || cur != m_boundEgressInterface))) {
+        // PPP/RAS reconnects can keep the same friendly name while replacing
+        // the interface index or IPv4 address. Existing bound sockets and XHTTP
+        // pools still belong to the old link, so rebuild them promptly.
         m_ifcMovedStreak = 0;
         if (++m_ifcDownStreak < kIfcDownTicks) return;
+    } else if (cur == m_boundEgressInterface) {
+        // Still pinned to the same interface and interface identity: idle.
+        m_ifcDownStreak = 0;
+        m_ifcMovedStreak = 0;
+        return;
     } else {
+        // The preferred default route moved off the interface our egress is
+        // pinned to. Handle it slowly so ordinary interface churn (a second NIC
+        // appearing, an automatic-metric change, Wi-Fi and Ethernet both up)
+        // cannot trigger a restart storm.
         // Bound interface still looks up (present, IsUp, has a routable address)
         // yet the OS has preferred another interface for a sustained stretch. The
         // pin usually still carries traffic, so only rebind if this persists —
@@ -788,7 +807,8 @@ void MainWindow::checkDefaultInterfaceChange() {
     const int startedId = running->id;
     MW_show_log(tr("[interface-bind] rebinding egress: bound interface %1 %2 (default route now %3)")
                     .arg(m_boundEgressInterface,
-                         boundUsable ? tr("deprioritized too long") : tr("is down"),
+                         boundChanged ? tr("changed address or index") :
+                         (boundUsable ? tr("deprioritized too long") : tr("is down")),
                          cur));
     profile_start(startedId);
 }
@@ -971,6 +991,7 @@ void MainWindow::profile_start(int _id) {
             // Arm the default-interface watch when this profile baked a static
             // egress interface bind; otherwise make sure it's stopped.
             m_boundEgressInterface = result->boundInterface;
+            m_boundEgressFingerprint = egressInterfaceFingerprint(m_boundEgressInterface);
             m_ifcDownStreak = 0;
             m_ifcMovedStreak = 0;
             if (m_boundEgressInterface.isEmpty()) m_defaultInterfaceWatch->stop();
@@ -1129,6 +1150,7 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
             // Interface-bound egress (if any) is gone; stop watching the route.
             if (m_defaultInterfaceWatch) m_defaultInterfaceWatch->stop();
             m_boundEgressInterface.clear();
+            m_boundEgressFingerprint.clear();
             m_ifcDownStreak = 0;
             m_ifcMovedStreak = 0;
 

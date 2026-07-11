@@ -29,18 +29,11 @@ if(APPLE)
 elseif(WIN32)
     target_sources(qhotkey PRIVATE 3rdparty/QHotkey/qhotkey_win.cpp)
 else()
-    # Linux/Unix: build BOTH the X11 and the XDG-portal (Wayland) backends and
-    # choose between them at runtime (see 3rdparty/QHotkey/qhotkey_linux.cpp),
-    # since one binary may run under X11, native Wayland or XWayland.
     find_package(X11 REQUIRED)
-    find_package(Qt6 REQUIRED COMPONENTS DBus)
-    target_link_libraries(qhotkey PRIVATE ${X11_LIBRARIES} Qt6::DBus)
+    target_link_libraries(qhotkey PRIVATE ${X11_LIBRARIES})
 
     include_directories(${X11_INCLUDE_DIR})
-    target_sources(qhotkey PRIVATE
-        3rdparty/QHotkey/qhotkey_x11.cpp
-        3rdparty/QHotkey/qhotkey_portal.cpp
-        3rdparty/QHotkey/qhotkey_linux.cpp)
+    target_sources(qhotkey PRIVATE 3rdparty/QHotkey/qhotkey_x11.cpp)
 endif()
 
 include(GNUInstallDirs)

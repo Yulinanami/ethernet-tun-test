@@ -165,13 +165,10 @@ namespace Configs {
         {
             ctx->isResolvedUsed = isSystemdResolvedDefaultResolver();
         }
-        // Resolve the physical default-route interface once per real build. When
-        // Xray is the final egress under TUN we bind its egress socket directly
-        // to this interface (streamSettings.sockopt.interface) instead of
-        // detouring through a sing-box socks loopback bridge. Skipped for
-        // test/export builds (an export must stay machine-portable) and when TUN
-        // is off (no loop to prevent). On any RPC failure defaultInterface stays
-        // empty and the build falls back to the loopback bridge.
+        // Resolve the physical default-route interface once per TUN build. Final
+        // sing-box and Xray egress sockets bind to it so transient default-route
+        // detection failures cannot stall traffic. On RPC failure the existing
+        // automatic-detection and loopback-bridge fallbacks remain in use.
         if (ctx->tunEnabled)
         {
             bool ifcOK = false;
@@ -940,7 +937,7 @@ namespace Configs {
         return {entID};
     }
 
-    void buildSingboxChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, QList<std::shared_ptr<Profile>> &ents, const QString& prefix, bool includeProxy, bool link, int startSuffix = 0, bool markIngress = false, bool warpWrap = false) {
+    void buildSingboxChain(std::shared_ptr<BuildSingBoxConfigContext> &ctx, QList<std::shared_ptr<Profile>> &ents, const QString& prefix, bool includeProxy, bool link, int startSuffix = 0, bool markIngress = false, bool warpWrap = false, bool bindFinalEgress = false) {
         for (int idx = 0; idx < ents.size(); idx++)
         {
             auto tag = prefix + "-" + Int2String(startSuffix + idx);
@@ -962,6 +959,19 @@ namespace Configs {
             object["tag"] = tag;
             if (!nextTag.isEmpty() && link) object["detour"] = nextTag;
             if (warpWrap && idx == 0) object["detour"] = "warp-bypass";
+            const bool hasManualNetworkSelection = object.contains("bind_interface") ||
+                                                   object.contains("inet4_bind_address") ||
+                                                   object.contains("inet6_bind_address") ||
+                                                   object.contains("network_strategy") ||
+                                                   object.contains("network_type") ||
+                                                   object.contains("fallback_network_type");
+            if (bindFinalEgress && idx == ents.size() - 1 && !ctx->forTest && !ctx->forExport &&
+                !ctx->defaultInterface.isEmpty() && !hasManualNetworkSelection &&
+                !ent->outbound->IsExtraCore() && !ent->outbound->IsXrayFullConfig()) {
+                object["bind_interface"] = ctx->defaultInterface;
+                MW_show_log("[interface-bind] " + prefix + " sing-box egress bound to default interface " + ctx->defaultInterface);
+                ctx->buildConfigResult->boundInterface = ctx->defaultInterface;
+            }
             if (ent->outbound->IsEndpoint())
             {
                 ctx->endpoints.append(object);
@@ -1158,13 +1168,14 @@ namespace Configs {
             ctx->xrayToSingBridges << xrayToSingBridgeConf;
         }
         if (!initialSingEnts.isEmpty()) {
-            buildSingboxChain(ctx, initialSingEnts, prefix, includeProxy, link, startSuffix, false, warpWrap);
+            const bool bindInitialEgress = xrayEnts.isEmpty() && tailingSingEnts.isEmpty();
+            buildSingboxChain(ctx, initialSingEnts, prefix, includeProxy, link, startSuffix, false, warpWrap, bindInitialEgress);
         }
         if (!xrayEnts.isEmpty()) {
             buildXrayChain(ctx, xrayEnts, prefix, includeProxy, link, startSuffix, xrayToSingBridgeConf);
         }
         if (!tailingSingEnts.isEmpty()) {
-            buildSingboxChain(ctx, tailingSingEnts, prefix, false, link, startSuffix + initialSingEnts.size(), true);
+            buildSingboxChain(ctx, tailingSingEnts, prefix, false, link, startSuffix + initialSingEnts.size(), true, false, true);
         }
 
         if (!ents.isEmpty()) {
@@ -1258,17 +1269,26 @@ namespace Configs {
         ctx->buildConfigResult->coreConfig["inbounds"] = inboundArr;
 
         if (loopbackBridgeCount > 0) {
-            ctx->outbounds.append(QJsonObject{
+            QJsonObject xrayDirectOutbound{
                 {"type", "direct"},
                 {"tag", "xray-direct"}
-            });
+            };
+            if (!ctx->forTest && !ctx->forExport && !ctx->defaultInterface.isEmpty()) {
+                xrayDirectOutbound["bind_interface"] = ctx->defaultInterface;
+            }
+            ctx->outbounds.append(xrayDirectOutbound);
         }
 
         // Add the direct outbound
-        ctx->outbounds.append(QJsonObject{
-        {"type", "direct"},
-        {"tag", "direct"}
-        });
+        QJsonObject directOutbound{
+            {"type", "direct"},
+            {"tag", "direct"}
+        };
+        if (!ctx->forTest && !ctx->forExport && !ctx->defaultInterface.isEmpty()) {
+            directOutbound["bind_interface"] = ctx->defaultInterface;
+            ctx->buildConfigResult->boundInterface = ctx->defaultInterface;
+        }
+        ctx->outbounds.append(directOutbound);
 
         ctx->buildConfigResult->coreConfig["endpoints"] = ctx->endpoints;
         ctx->buildConfigResult->coreConfig["outbounds"] = ctx->outbounds;
