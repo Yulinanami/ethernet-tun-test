@@ -15,25 +15,25 @@ jobs:
   build-go:
     permissions:
       contents: read
-    runs-on: macos-latest
+    runs-on: ubuntu-22.04
     env:
       DEST: ${{ github.workspace }}/deployment/windows-amd64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
       - name: Cache Core Artifact
         id: cache-common
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: artifacts.tgz
-          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/**') }}-1.26.3
+          key: QuickCommonCache-windows-amd64-${{ hashFiles('script/build_go.sh', 'core/**') }}-1.27.0
       - name: Setup Go
         if: steps.cache-common.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5.5.0
+        uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26.3"
+          go-version: "1.27.0"
           cache-dependency-path: |
-            core/server/go.sum
+            core/go.sum
       - name: Install Protoc
         if: steps.cache-common.outputs.cache-hit != 'true'
         uses: arduino/setup-protoc@v3
@@ -43,7 +43,7 @@ jobs:
       - name: Install protoc plugins
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
       - name: Build Go Core
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -54,10 +54,11 @@ jobs:
         if: steps.cache-common.outputs.cache-hit != 'true'
         run: tar czvf artifacts.tgz ./deployment
       - name: Upload Core Artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: Quick-${{ github.sha }}-Common-windows-amd64
           path: artifacts.tgz
+          compression-level: 0
 
   build-windows:
     permissions:
@@ -67,21 +68,34 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
+      - name: Checking out the web dashboard
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: SagerNet/sing-box-dashboard
+          ref: gh-pages
+          path: dashboard-src
+      - name: Bundling the web dashboard
+        shell: bash
+        run: |
+          rm -rf dashboard-src/.git || true
+          cp -R dashboard-src/. res/dashboard/
+          test -f res/dashboard/index.html
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
       - name: Download Core Artifact
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
+          name: Quick-${{ github.sha }}-Common-windows-amd64
           path: download-artifact
       - name: Build App
         shell: bash
         run: |
-          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.1/Qt_6.11.1_x64.7z
+          curl -L -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.2/Qt_6.11.2_x64.7z
           7z x qt.7z
           curl -L -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_x64.7z
           7z x openssl.7z
@@ -108,7 +122,8 @@ jobs:
           cd deployment/windows-amd64
           7z a -mx9 ../Throne-windows-amd64-runnable.zip .
       - name: Upload Runnable Zip
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: Quick-${{ github.sha }}-windows-amd64-runnable
           path: deployment/Throne-windows-amd64-runnable.zip
+          compression-level: 0
