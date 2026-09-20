@@ -23,12 +23,13 @@ namespace Configs
         // gRPC
         QString service_name;
 
-        // baseConfig overrides
         bool ParseFromLink(const QString& link) override;
         bool ParseFromJson(const QJsonObject& object) override;
         bool ParseFromClash(const clash::Proxies& object) override;
         QString ExportToLink() override;
+        QString ExportToLink(bool tlsEnabled);
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
     };
 }

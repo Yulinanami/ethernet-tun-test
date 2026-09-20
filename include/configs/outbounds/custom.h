@@ -1,4 +1,5 @@
 #pragma once
+#include <QJsonArray>
 #include "include/configs/common/Outbound.h"
 
 namespace Configs
@@ -14,9 +15,7 @@ namespace Configs
         QString config;
         QString type;
 
-        // Transient bridge fields, populated during build for CustomXrayFullConfig.
-        // Build() returns a sing-box socks outbound pointing at this port; the
-        // generated Xray config receives a matching socks inbound.
+        // Transient bridge fields: Build() emits a socks outbound on this port; Xray gets the matching inbound.
         int bridgePort = 0;
         QString bridgeAuth;
         QString bridgeHost = "127.0.0.1";
@@ -86,9 +85,44 @@ namespace Configs
             return type;
         };
 
+        SecurityInfo GetSecurity() override;
+
+        QJsonObject ExportIdentity() override;
+
+        bool IsEndpoint() override
+        {
+            // Only raw sing-box outbound JSON can describe an endpoint.
+            if (type != CustomOutbound) return false;
+            const auto t = QString2QJsonObject(config)["type"].toString();
+            return t == "wireguard" || t == "tailscale" || t == "masque";
+        }
+
         bool IsXray() override { return type == CustomXrayOutbound; }
 
         bool IsXrayFullConfig() override { return type == CustomXrayFullConfig; }
+
+        // Raw addresses (callers filter literal IPs) for sing-box's direct-DNS carve-out.
+        QStringList GetXrayFullConfigServerDomains() {
+            QStringList domains;
+            if (type != CustomXrayFullConfig) return domains;
+            const auto outbounds = QString2QJsonObject(config)["outbounds"].toArray();
+            for (const auto &v : outbounds) {
+                auto settings = v.toObject()["settings"].toObject();
+                auto collect = [&](const QString &key) {
+                    for (const auto &s : settings[key].toArray()) {
+                        auto addr = s.toObject()["address"].toString();
+                        if (!addr.isEmpty()) domains << addr;
+                    }
+                };
+                if (settings.contains("vnext")) collect("vnext");
+                if (settings.contains("servers")) collect("servers");
+                if (settings.contains("address")) {
+                    auto addr = settings["address"].toString();
+                    if (!addr.isEmpty()) domains << addr;
+                }
+            }
+            return domains;
+        }
 
         BuildResult Build() override
         {
@@ -102,8 +136,7 @@ namespace Configs
                         }, ""};
             }
             if (type == CustomXrayOutbound) {
-                // Dummy sing-box outbound so sing-box CheckConfig accepts the
-                // config during validation. The real outbound is in BuildXray().
+                // Dummy outbound so sing-box CheckConfig passes; the real one is in BuildXray().
                 return {QJsonObject{
                             {"type", "socks"},
                             {"server", "127.0.0.1"},
@@ -115,6 +148,7 @@ namespace Configs
         BuildResult BuildXray() override
         {
             if (type == CustomXrayOutbound) {
+                // Domain resolution is wired on at instance creation (ThroneWiring), not as sockopt.domainStrategy.
                 return {QString2QJsonObject(config), ""};
             }
             return {};

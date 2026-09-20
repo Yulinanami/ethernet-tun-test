@@ -54,12 +54,16 @@ DialogEditGroup::DialogEditGroup(const std::shared_ptr<Configs::Group> &ent, QWi
     idToName.reserve(proxyListRaw.size());
     for (const auto& [id, name] : proxyListRaw) idToName.insert(id, name);
     QList<std::pair<int, QString>> proxyList;
+    // An auto selector moves server on its own, so it cannot hold a fixed front/landing slot.
+    const auto selectorIDsRaw = Configs::dataManager->profilesRepo->GetProfileIdsByType("autoselector");
+    const QSet<int> selectorIDs(selectorIDsRaw.begin(), selectorIDsRaw.end());
     auto groupIDs = Configs::dataManager->groupsRepo->GetGroupsTabOrder();
     for (auto groupID: groupIDs) {
         auto group = Configs::dataManager->groupsRepo->GetGroup(groupID);
         if (!group) continue;
         const QString prefix = "[" + group->name + "] ";
         for (int profileID : group->profiles) {
+            if (selectorIDs.contains(profileID)) continue;
             auto it = idToName.constFind(profileID);
             if (it == idToName.constEnd()) continue;
             proxyList << std::make_pair(profileID, prefix + it.value());
@@ -208,9 +212,9 @@ void DialogEditGroup::accept() {
             return;
         }
     }
-    ent->name = ui->name->text();
+    ent->name = ui->name->text().trimmed();
     ent->auto_clear_unavailable = ui->auto_clear_unavailable->isChecked();
-    ent->url = ui->url->text();
+    ent->url = ui->url->text().trimmed();
     ent->skip_auto_update = ui->skip_auto_update->isChecked();
     ent->front_proxy_id = resolve_proxy_selection(ui->front_proxy, CACHE.front_proxy);
     ent->landing_proxy_id = resolve_proxy_selection(ui->landing_proxy, LANDING.landing_proxy);

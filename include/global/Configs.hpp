@@ -3,9 +3,10 @@
 #include "Const.hpp"
 #include "Utils.hpp"
 #include "include/database/DatabaseManager.h"
-#include <srslist.h>
 
-// Switch core support
+#include <array>
+#include <string_view>
+#include <utility>
 
 namespace Configs {
     void initDB(const std::string& dbPath);

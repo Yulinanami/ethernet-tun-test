@@ -22,7 +22,6 @@ namespace Configs {
         auto query = QUrlQuery(url.query());
         outbound::ParseFromLink(url.toString());
 
-        // Traditional SS format
         if (url.password().isEmpty()) {
             // Traditional format: method:password base64 encoded in username
             auto method_password = DecodeB64IfValid(url.userName(), QByteArray::Base64Option::Base64UrlEncoding);
@@ -119,11 +118,9 @@ namespace Configs {
         url.setScheme("ss");
         
         if (method.startsWith("2022-")) {
-            // 2022 format: method:password directly
             url.setUserName(method);
             url.setPassword(password);
         } else {
-            // Traditional format: base64 encode method:password
             auto method_password = method + ":" + password;
             url.setUserName(method_password.toUtf8().toBase64(QByteArray::Base64Option::Base64UrlEncoding));
         }
@@ -181,5 +178,29 @@ namespace Configs {
     QString shadowsocks::DisplayType()
     {
         return "Shadowsocks";
+    }
+
+    SecurityInfo shadowsocks::GetSecurity()
+    {
+        SecurityInfo info;
+        if (method.isEmpty() || method == "none") {
+            info.label = QObject::tr("Raw");
+            info.level = SecurityLevel::None;
+            return info;
+        }
+        // Pre-AEAD stream ciphers: no integrity, trivially detectable.
+        static const QStringList streamCiphers = {
+            "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+            "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+            "rc4-md5", "chacha20-ietf", "xchacha20",
+        };
+        if (streamCiphers.contains(method)) {
+            info.label = QObject::tr("Weak Cipher");
+            info.level = SecurityLevel::Weak;
+            return info;
+        }
+        info.label = QObject::tr("Encrypted");
+        info.level = SecurityLevel::Secure;
+        return info;
     }
 }

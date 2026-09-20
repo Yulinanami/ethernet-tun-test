@@ -13,6 +13,12 @@ namespace Configs
 
         QString DisplayAddress() override { return ""; };
 
+        // No security of its own; it inherits whatever its hops use.
+        SecurityInfo GetSecurity() override { return {}; }
+
+        // Holds no secret itself; every hop is checked separately.
+        bool SupportsCredentialStrip() const override { return true; }
+
         bool ParseFromJson(const QJsonObject &object) override {
             if (object.isEmpty()) return false;
             if (object.contains("name")) name = object["name"].toString();

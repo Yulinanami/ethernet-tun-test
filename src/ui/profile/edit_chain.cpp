@@ -38,10 +38,7 @@ bool EditChain::onEnd() {
         auto e = Configs::dataManager->profilesRepo->GetProfile(id);
         if (e != nullptr && e->outbound != nullptr && e->outbound->IsExtraCore()) {
             extracoreCount++;
-            // A profile using an extra core must be the outermost detour,
-            // which corresponds to the top of the chain list (index 0). This
-            // is the only position where its local socks server (127.0.0.1)
-            // can be reached directly.
+            // An extra core is reachable only at 127.0.0.1, so it must be the outermost detour (index 0).
             if (i != 0) {
                 MessageBoxWarning(software_name, tr("Profiles that use an extra core can only be the final hop in the chain. Move it to the top of the list."));
                 return false;
@@ -65,15 +62,24 @@ void EditChain::on_select_profile_clicked() {
     });
 }
 
+static bool acceptChainHop(const std::shared_ptr<Configs::Profile> &ent) {
+    if (ent == nullptr || ent->type == "chain") return false;
+    if (ent->type == "autoselector") {
+        MessageBoxWarning(software_name, QObject::tr("An auto selector cannot be a hop in a chain: it moves to a different "
+                                                     "server on its own whenever one degrades."));
+        return false;
+    }
+    return true;
+}
+
 void EditChain::AddProfileToListIfExist(int profileId) {
     auto _ent = Configs::dataManager->profilesRepo->GetProfile(profileId);
-    if (_ent != nullptr && _ent->type != "chain") {
+    if (acceptChainHop(_ent)) {
         auto wI = new QListWidgetItem();
         wI->setData(114514, profileId);
         auto w = new ProxyItem(this, _ent, wI);
         ui->listWidget->addItem(wI);
         ui->listWidget->setItemWidget(wI, w);
-        // change button
         connect(w->get_change_button(), &QPushButton::clicked, w, [=,this] {
             get_edit_dialog()->hide();
             GetMainWindow()->start_select_mode(w, [=,this](int newId) {
@@ -86,7 +92,7 @@ void EditChain::AddProfileToListIfExist(int profileId) {
 
 void EditChain::ReplaceProfile(ProxyItem *w, int profileId) {
     auto _ent = Configs::dataManager->profilesRepo->GetProfile(profileId);
-    if (_ent != nullptr && _ent->type != "chain") {
+    if (acceptChainHop(_ent)) {
         w->item->setData(114514, profileId);
         w->ent = _ent;
         w->refresh_data();

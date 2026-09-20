@@ -25,7 +25,6 @@ namespace Configs
             return multiplex;
         }
 
-        // baseConfig overrides
         bool ParseFromLink(const QString& link) override;
         bool ParseFromJson(const QJsonObject& object) override;
         bool ParseFromClash(const clash::Proxies& object) override;
@@ -35,5 +34,6 @@ namespace Configs
         BuildResult Build() override;
 
         QString DisplayType() override;
+        SecurityInfo GetSecurity() override;
     };
 }

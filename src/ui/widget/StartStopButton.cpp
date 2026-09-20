@@ -10,13 +10,6 @@
 #include <QRadialGradient>
 #include <QStyle>
 #include <QStyleOptionToolButton>
-#include <QTimer>
-#include <QtMath>
-
-namespace {
-constexpr int kGlowPeriodMs = 3400;  // one full breath
-constexpr int kGlowIntervalMs = 33;  // ~30fps; the slow breath needs no more
-}  // namespace
 
 StartStopButton::StartStopButton(QWidget *parent) : QToolButton(parent) {
     setFocusPolicy(Qt::NoFocus);
@@ -28,7 +21,6 @@ StartStopButton::StartStopButton(QWidget *parent) : QToolButton(parent) {
     m_pressAnim = new QPropertyAnimation(this, "press", this);
     m_ringColorAnim = new QPropertyAnimation(this, "ringColor", this);
 
-    // Looping animations: the connecting spinner and the running glow.
     m_spinAnim = new QPropertyAnimation(this, "spin", this);
     m_spinAnim->setStartValue(0.0);
     m_spinAnim->setEndValue(360.0);
@@ -36,22 +28,9 @@ StartStopButton::StartStopButton(QWidget *parent) : QToolButton(parent) {
     m_spinAnim->setLoopCount(-1);
     m_spinAnim->setEasingCurve(QEasingCurve::Linear);
 
-    // glow is a 0..1 phase advanced at a constant rate; paint maps it through a
-    // raised cosine, so the breath rises and falls at equal rates and dwells
-    // equally at bright and dim (InOutSine here lingered dim and rushed the peak).
-    // A 3.4s breath needs nowhere near the display refresh rate, so we drive it
-    // from a ~30fps timer instead of a vsync-locked QPropertyAnimation; the phase
-    // is read from an elapsed clock so the cadence is immune to timer jitter.
-    m_glowTimer = new QTimer(this);
-    m_glowTimer->setInterval(kGlowIntervalMs);
-    m_glowTimer->setTimerType(Qt::CoarseTimer);
-    connect(m_glowTimer, &QTimer::timeout, this,
-            [this] { setGlow((m_glowClock.elapsed() % kGlowPeriodMs) / qreal(kGlowPeriodMs)); });
-
     connect(this, &QAbstractButton::pressed, this, [this] { animate(m_pressAnim, 1.0, 110); });
     connect(this, &QAbstractButton::released, this, [this] { animate(m_pressAnim, 0.0, 160); });
 
-    // Establish the initial visuals without an entry animation.
     m_state = State::Disabled;
     applyState(false);
 }
@@ -69,12 +48,10 @@ void StartStopButton::setState(State s) {
 void StartStopButton::setMode(Mode m) {
     if (m == m_mode) return;
     m_mode = m;
-    // The mode colour only shows while running; animate the ring if it's live.
     if (m_state == State::Running) animate(m_ringColorAnim, targetRingColor(), 320);
 }
 
 void StartStopButton::applyState(bool animated) {
-    // Idle and Running are clickable; Connecting (no cancel) and Disabled are not.
     const bool interactive = (m_state == State::Idle || m_state == State::Running);
     setEnabled(interactive);
     setCursor(interactive ? Qt::PointingHandCursor : Qt::ArrowCursor);
@@ -87,8 +64,6 @@ void StartStopButton::applyState(bool animated) {
         case State::Disconnecting: setToolTip(tr("Stopping…")); break;
     }
 
-    // Keep the stop square while disconnecting; it morphs to the play triangle
-    // only once the profile has actually stopped (mirrors Connecting -> Running).
     const qreal morphTarget = (m_state == State::Running || m_state == State::Disconnecting) ? 1.0 : 0.0;
     const qreal dimTarget = (m_state == State::Disabled) ? 0.45 : 1.0;
     const QColor ringTarget = targetRingColor();
@@ -129,26 +104,10 @@ void StartStopButton::setLoopRunning(QPropertyAnimation *anim, bool running) {
     update();
 }
 
-void StartStopButton::setGlowRunning(bool running) {
-    if (running) {
-        if (!m_glowTimer->isActive()) {
-            m_glowClock.restart();
-            setGlow(0.0);
-            m_glowTimer->start();
-        }
-        return;
-    }
-    m_glowTimer->stop();
-    setGlow(0.0);
-}
 
-// Start/stop the looping animations for the current state, but only while the
-// button is on screen; hideEvent/showEvent toggle m_shown so a minimised or
-// hidden-to-tray window stops driving repaints for nobody.
 void StartStopButton::updateLoops() {
     const bool spinning = m_state == State::Connecting || m_state == State::Disconnecting;
     setLoopRunning(m_spinAnim, m_shown && spinning);
-    setGlowRunning(m_shown && m_state == State::Running);
 }
 
 void StartStopButton::showEvent(QShowEvent *e) {
@@ -160,7 +119,6 @@ void StartStopButton::showEvent(QShowEvent *e) {
 void StartStopButton::hideEvent(QHideEvent *e) {
     m_shown = false;
     setLoopRunning(m_spinAnim, false);
-    setGlowRunning(false);
     QToolButton::hideEvent(e);
 }
 
@@ -169,8 +127,7 @@ void StartStopButton::changeEvent(QEvent *e) {
         case QEvent::StyleChange:
         case QEvent::PaletteChange:
         case QEvent::ThemeChange:
-            // The cached chrome depends on the active style/palette; drop it so
-            // the next paint re-renders it with the new look.
+            // The cached chrome was rendered through the old style/palette.
             m_chromeCache = QPixmap();
             break;
         default:
@@ -178,8 +135,6 @@ void StartStopButton::changeEvent(QEvent *e) {
     }
     QToolButton::changeEvent(e);
 }
-
-// --- colours -------------------------------------------------------------
 
 QColor StartStopButton::modeColor(Mode m) const {
     switch (m) {
@@ -194,18 +149,14 @@ QColor StartStopButton::modeColor(Mode m) const {
 }
 
 QColor StartStopButton::idleRingColor() const {
-    // Almost invisible: while nothing is running the glyph carries the look and
-    // the ring recedes to a faint hint.
     QColor c = palette().color(QPalette::WindowText);
     c.setAlphaF(0.12);
     return c;
 }
 
 QColor StartStopButton::glyphColor() const {
-    // Semantic, muted glyph colours: a gray-green "go" triangle while idle, a
-    // red "stop" square once a profile is running.
     if (m_state == State::Running || m_state == State::Disconnecting) return {0x99, 0x46, 0x46}; // dim, slightly darker red
-    return Qt::darkGreen;                                // dim gray-green
+    return Qt::darkGreen;
 }
 
 QColor StartStopButton::targetRingColor() const {
@@ -216,8 +167,6 @@ QColor StartStopButton::targetRingColor() const {
         default: return idleRingColor();
     }
 }
-
-// --- painting ------------------------------------------------------------
 
 void StartStopButton::ensureChromeCache() {
     if (size().isEmpty()) {
@@ -234,14 +183,11 @@ void StartStopButton::ensureChromeCache() {
     opt.subControls &= ~QStyle::SC_ToolButtonMenu;
     opt.arrowType = Qt::NoArrow;
     if (m_state == State::Connecting || m_state == State::Disconnecting) {
-        // Keep the frame looking active during a transition, even though clicks
-        // are disabled (there is no cancel).
+        // Force the frame to look enabled: a transition is not clickable but must not look dead.
         opt.state |= QStyle::State_Enabled;
         opt.state &= ~QStyle::State_Sunken;
     }
 
-    // Only the size, DPR, and style state (enabled/hover/sunken/…) affect the
-    // chrome; when they are unchanged the previous render is reused verbatim.
     const qreal dpr = devicePixelRatioF();
     const uint stateKey = static_cast<uint>(opt.state);
     const uint subKey = static_cast<uint>(opt.activeSubControls);
@@ -269,19 +215,13 @@ void StartStopButton::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    // 1. Standard tool-button chrome, so it matches the sibling toolbar buttons.
-    //    It never animates, so it is rendered through QStyle once and the cached
-    //    pixmap is blitted here; the looping running/connecting repaints would
-    //    otherwise re-run the full (possibly stylesheet-backed) style per frame.
     ensureChromeCache();
     p.drawPixmap(0, 0, m_chromeCache);
 
-    // 2. Custom indicator, centred in the content area.
     const QRectF cr = contentsRect();
     const qreal D = qMin(cr.width(), cr.height());
     const QPointF c = cr.center();
 
-    // Press feedback: scale only the indicator (the frame stays put).
     const qreal scale = 1.0 - 0.06 * m_press;
     p.translate(c);
     p.scale(scale, scale);
@@ -294,7 +234,6 @@ void StartStopButton::paintEvent(QPaintEvent *) {
     p.setOpacity(m_dim);
 
     if (m_state == State::Connecting || m_state == State::Disconnecting) {
-        // Faint full track with a bright round-capped arc sweeping over it.
         p.setBrush(Qt::NoBrush);
         QColor track = m_ringColor;
         track.setAlphaF(0.20);
@@ -309,23 +248,15 @@ void StartStopButton::paintEvent(QPaintEvent *) {
         const int spanAngle = -110 * 16;                       // sweep clockwise
         p.drawArc(rr, startAngle, spanAngle);
     } else if (m_state == State::Running) {
-        // The whole ring "breathes": a soft interior wash + a gentle outer bloom
-        // rise and fall with the glow phase. Kept subtle so it reads as a calm
-        // breath rather than a hard pulsing light.
-        // Linear phase -> raised cosine: smooth, symmetric, equal dwell/rise/fall.
-        const qreal pulse = 0.5 - 0.5 * qCos(m_glow * 2.0 * M_PI);
+        constexpr qreal kSteadyGlow = 0.5;
 
-        // Soft glow that peaks at the ring and fades to nothing outward, so the
-        // halo melts into the background instead of being a flat band of colour.
         const qreal glowR = R + penW * 2.4;
         const qreal ringStop = R / glowR;
         QColor gPeak = m_ringColor;
-        gPeak.setAlphaF(0.20 + 0.40 * pulse);
+        gPeak.setAlphaF(0.20 + 0.40 * kSteadyGlow);
         QColor gEdge = m_ringColor;
         gEdge.setAlphaF(0.0);
-        // Outward only: the interior stays clear (the inner stops are transparent,
-        // the rise hidden under the ring stroke); the halo peaks at the ring and
-        // fades to nothing beyond it.
+        // Transparent up to the ring stop, so the halo spreads outward only.
         QRadialGradient g(c, glowR);
         g.setColorAt(0.0, gEdge);
         g.setColorAt(ringStop * 0.9, gEdge);
@@ -335,10 +266,9 @@ void StartStopButton::paintEvent(QPaintEvent *) {
         p.setBrush(g);
         p.drawEllipse(c, glowR, glowR);
 
-        // Crisp core ring on top, barely brightening at the peak.
         p.setBrush(Qt::NoBrush);
-        QColor base = m_ringColor.lighter(static_cast<int>(101 + 9 * pulse));
-        base.setAlphaF(0.95); // a touch dimmer than the full mode colour
+        QColor base = m_ringColor.lighter(static_cast<int>(101 + 9 * kSteadyGlow));
+        base.setAlphaF(0.95);
         QConicalGradient cg(c, 90.0);
         cg.setColorAt(0.0, base.lighter(116));
         cg.setColorAt(0.5, base);
@@ -348,7 +278,6 @@ void StartStopButton::paintEvent(QPaintEvent *) {
         p.setPen(ringPen);
         p.drawEllipse(c, R, R);
     } else {
-        // Idle / Disabled: a faint hint of a ring (the glyph carries the look).
         p.setBrush(Qt::NoBrush);
         QPen ringPen(m_ringColor, penW);
         ringPen.setCapStyle(Qt::RoundCap);
@@ -356,13 +285,10 @@ void StartStopButton::paintEvent(QPaintEvent *) {
         p.drawEllipse(c, R, R);
     }
 
-    // Glyph: play triangle (morph 0) <-> stop square (morph 1).
     const qreal h = D * 0.136;
     const qreal t = m_morph;
     auto lerp = [](const QPointF &a, const QPointF &b, qreal k) { return a + (b - a) * k; };
-    // Shift the play triangle right so it balances on its centroid; a bbox-
-    // centred triangle reads as sitting too far left. The offset interpolates
-    // away as it morphs into the (already centred) stop square.
+    // Offset to the triangle's centroid; a bbox-centred triangle reads as too far left.
     const qreal triShift = h / 3.0;
     const QPointF tri[4] = {
         c + QPointF(-h + triShift, -h),
@@ -381,7 +307,7 @@ void StartStopButton::paintEvent(QPaintEvent *) {
     for (int i = 1; i < 4; ++i) path.lineTo(lerp(tri[i], sq[i], t));
     path.closeSubpath();
 
-    // Glossy vertical gradient + rounded corners (via a round-joined pen).
+    // The glyph's rounded corners come from the round-joined pen, not from the path.
     QLinearGradient lg(c.x(), c.y() - h, c.x(), c.y() + h);
     const QColor g1 = glyphColor();
     lg.setColorAt(0.0, g1.lighter(118));
@@ -390,7 +316,6 @@ void StartStopButton::paintEvent(QPaintEvent *) {
     QPen gpen(QBrush(lg), corner);
     gpen.setJoinStyle(Qt::RoundJoin);
     gpen.setCapStyle(Qt::RoundCap);
-    // The glyph fades back during a transition so the spinner reads as the action.
     const qreal glyphAlpha = (m_state == State::Connecting || m_state == State::Disconnecting) ? 0.5 : 1.0;
     p.setOpacity(m_dim * glyphAlpha);
     p.setPen(gpen);

@@ -8,6 +8,12 @@ namespace Configs {
     inline QStringList XrayXHTTPUplinkDataPlacements = {"", "auto", "body", "cookie", "header"};
     inline QStringList XrayXHTTPUplinkMethods = {"", "POST", "PUT", "PATCH", "GET"};
 
+    // dns-direct answers every outbound server domain, so its "disable IPv6" caps this.
+    QString getDirectDomainStrategy();
+
+    // Passed to the core as LoadConfigReq.xray_outbound_dns_strategy (ThroneWiring), not baked into the config.
+    QString getXrayOutboundDomainStrategy();
+
     class xrayTLS : public baseConfig {
         public:
         QString serverName;
@@ -140,6 +146,8 @@ namespace Configs {
         public:
         QString network = "raw";
         QString security = "none";
+        QJsonObject rawSettings;
+        QJsonObject finalmask;
         std::shared_ptr<xrayTLS> TLS = std::make_shared<xrayTLS>();
         std::shared_ptr<xrayReality> reality = std::make_shared<xrayReality>();
         std::shared_ptr<xrayXHTTP> xhttp = std::make_shared<xrayXHTTP>();
@@ -152,6 +160,7 @@ namespace Configs {
         bool ParseFromClash(const clash::Proxies& object) override;
         QString ExportToLink() override;
         QJsonObject ExportToJson() override;
+        QJsonObject ExportIdentity() override;
         BuildResult Build() override;
     };
 }

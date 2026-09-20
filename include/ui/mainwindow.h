@@ -3,7 +3,7 @@
 #include <QMainWindow>
 #include <include/global/HTTPRequestHelper.hpp>
 #ifndef Q_MOC_RUN
-#include <core/server/gen/libcore.pb.h>
+#include <core/gen/libcore.pb.h>
 #endif
 
 #include "include/global/Configs.hpp"
@@ -16,10 +16,12 @@
 
 #ifndef MW_INTERFACE
 
+#include <optional>
 #include <QKeyEvent>
-#include <QSystemTrayIcon>
+#include "include/ui/widget/TrayIcon.hpp"
 #include <QPointer>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QQueue>
 #include <QWaitCondition>
 #include <QProcess>
@@ -27,6 +29,10 @@
 #include <QShortcut>
 #include <QKeySequence>
 #include <QSet>
+#include <QHash>
+#include <QIcon>
+#include <QPixmap>
+#include <QToolButton>
 #include <QCheckBox>
 #include <QSemaphore>
 #include <QMutex>
@@ -36,7 +42,9 @@
 
 #include "group/GroupSort.hpp"
 #include "include/global/GuiUtils.hpp"
+#include "include/ui/setting/Icon.hpp"
 #include "include/ui/utils/DataViewHtmlGenerator.h"
+#include "include/ui/utils/ProfilesFilterProxyModel.h"
 #include "include/ui/utils/ProfilesTableModel.h"
 #include "ui_mainwindow.h"
 
@@ -46,7 +54,23 @@ namespace Configs_sys {
     class CoreProcess;
 }
 
+namespace Configs {
+    enum simpleAction : int;
+}
+
 class TrayProfileSelector;
+class TrayOtpCodes;
+class TestRunner;
+class DialogVpnAuth;
+struct VpnAuthChallenge;
+
+struct VpnEndpointState {
+    QString tag;
+    QString state;
+    QString error;
+    bool connected = false;
+    bool authFailed = false;
+};
 
 namespace Qv2ray::ui { class SyntaxHighlighter; }
 
@@ -56,6 +80,19 @@ namespace Ui {
 }
 QT_END_NAMESPACE
 
+enum class RefreshAnchor {
+    KeepPlace,
+    Removal,
+};
+
+enum class ExitReason {
+    None,
+    RunUpdater,
+    Restart,
+    RestartWithTun,
+    RestartWithDns,
+};
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -64,17 +101,22 @@ public:
 
     ~MainWindow() override;
 
-    // Runtime Stats panel helpers, read on the UI thread. GetCorePid returns 0
-    // when the core process isn't running; GetRunningConfigName is empty when no
-    // profile is active.
     qint64 GetCorePid();
     QString GetRunningConfigName();
 
+    // The two live VPN queries below block on an RPC; never call them from the UI thread.
+    static QString liveVpnConnectOkText();
+
+    static QString liveVpnStateText(bool *connected = nullptr);
+
     void prepare_exit();
 
-    void refresh_proxy_list(const QList<int> &ids = {}, bool mayNeedReset = false);
+    void refresh_proxy_list(const QList<int> &ids = {}, bool mayNeedReset = false,
+                            RefreshAnchor anchor = RefreshAnchor::KeepPlace);
 
     void show_group(int gid);
+
+    void show_group_tab_menu(const QPoint &tabBarPos);
 
     void refresh_groups();
 
@@ -94,7 +136,7 @@ public:
 
     void set_spmode_vpn(bool enable, bool save = true);
 
-    bool get_elevated_permissions(int reason = 3);
+    bool get_elevated_permissions(ExitReason reason = ExitReason::RestartWithTun);
 
     void start_select_mode(QObject *context, const std::function<void(int)> &callback);
 
@@ -102,11 +144,20 @@ public:
 
     bool StopVPNProcess();
 
-    void UpdateConnectionList(const QMap<QString, Stats::ConnectionMetadata>& toUpdate, const QMap<QString, Stats::ConnectionMetadata>& toAdd);
+    void RestartCore();
 
-    void UpdateConnectionListWithRecreate(const QList<Stats::ConnectionMetadata>& connections);
+    // Whole poll snapshot in the lister's order, never a delta. UI thread only.
+    void UpdateConnectionList(const QList<Stats::ConnectionMetadata>& connections);
 
     void UpdateDataView(bool force = false);
+
+    void noteRestartNeeded(const QString& reason);
+
+    void clearRestartNeeded();
+
+    void refresh_auto_selector_view();
+
+    class DialogAutoSelector *m_autoSelectorDialog = nullptr;
 
     void setDownloadReport(const DownloadProgressReport& report, bool show);
 
@@ -131,6 +182,10 @@ private slots:
     void on_menu_routing_settings_triggered();
 
     void on_menu_vpn_settings_triggered();
+
+    void on_menu_preset_settings_triggered();
+
+    void on_menu_otp_manager_triggered();
 
     void on_menu_hotkey_settings_triggered();
 
@@ -166,6 +221,8 @@ private slots:
 
     void on_menu_remove_invalid_triggered();
 
+    void on_menu_remove_insecure_triggered();
+
     void on_menu_resolve_selected_triggered();
 
     void on_menu_resolve_domain_triggered();
@@ -182,81 +239,72 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
+    QElapsedTimer sinceWindowDeactivated;
     ProfilesTableModel *profilesTableModel = nullptr;
-    QSystemTrayIcon *tray;
-    QMenu *trayMenu = nullptr;    // tray context menu
-    // Tray "Select Server"/"Select Routing" open this small Qt-drawn popup instead of a
-    // submenu, because a tray submenu isn't painted by Qt on Linux (SNI/DBusMenu) or macOS
-    // (native NSMenu) and so can't reliably expand a dynamic list. Recreated on each open.
+
+    ProfilesFilterProxyModel *profilesFilterModel = nullptr;
+    TrayIcon *tray;
+    QMenu *trayMenu = nullptr;
     QPointer<TrayProfileSelector> traySelector;
     void openTraySelector(bool routing);
+    QPointer<TrayOtpCodes> trayOtpCodes;
+    void openTrayOtpCodes();
     QShortcut *shortcut_esc = new QShortcut(QKeySequence::Cancel, this);
-    //
     QThreadPool *parallelCoreCallPool = new QThreadPool(this);
-    std::atomic<bool> stopSpeedtest = false;
-    QMutex speedtestRunning;
-    std::atomic<bool> currentUnderTest = false;
-    // Speed-test byte accounting. Tests bypass the clash tracker (they dial the
-    // outbound directly), so their traffic is counted only here: the core reports
-    // each test's cumulative bytes, and we diff against the last reported value
-    // per outbound tag to credit the delta. Guarded so the live micro-poll and
-    // the final reconciliation pass don't race.
-    QMutex speedtestCreditMu_;
-    QHash<QString, QPair<qint64, qint64>> speedtestCredited_;
-    //
+    std::unique_ptr<TestRunner> testRunner;
     Configs_sys::CoreProcess *core_process = nullptr;
-    QMutex coreProcessMutex; // serializes core_process init (DS_cores) vs IPC newConnection (UI)
+    QMutex coreProcessMutex;
     QLocalServer *core_server = nullptr;
     bool rpc_started = false;
     qint64 vpn_pid = 0;
-    //
     QTextDocument *qvLogDocument = new QTextDocument(this);
-    //
     QString title_error;
-    int icon_status = -1;
+    std::optional<Icon::TrayIconStatus> icon_status;
     std::shared_ptr<Configs::Profile> running;
     int last_running_profile_id = -1;
-    // True from the moment a profile start is kicked off until it succeeds or
-    // fails; drives the start/stop button's transient "Connecting" state.
     bool m_profileConnecting = false;
-    // True while a profile stop is in progress; drives the "Disconnecting" state.
     bool m_profileDisconnecting = false;
+    bool m_xrayGeoAssetBusy = false;
+    bool m_ruleSetUpdateBusy = false;
     QString traffic_update_cache;
     qint64 last_test_time = 0;
-    //
     int proxy_last_order = -1;
     bool select_mode = false;
     QMutex mu_starting;
     QMutex mu_stopping;
     QMutex mu_exit;
-    int exit_reason = 0;
-    //
+    ExitReason exit_reason = ExitReason::None;
     QMutex mu_download_update;
-    //
-    QMutex connectionListMu;
-    //
+    QMutex mu_download_dashboard;
+    class ConnectionsTreeModel *connectionsModel = nullptr;
+    class ConnectionsTreeFilterProxyModel *connectionsFilterModel = nullptr;
+    class ConnectionsFilterHeader *connectionFilterHeader = nullptr;
+    QHash<QString, bool> m_processExpanded; // per-process choices; the rest follow m_processesExpandedByDefault
+    bool m_processesExpandedByDefault = true;
+    QTimer *connectionFilterDebounce = nullptr;
+    QToolButton *connectionExpandButton = nullptr;
+    QToolButton *connectionCloseAllButton = nullptr;
+    QIcon connectionCloseIcon;
+    QIcon connectionExpandIcon;
+    QIcon connectionCollapseIcon;
     int toolTipID;
-    //
     SpeedWidget *speedChartWidget;
-    //
-    // for data view
-    QDateTime lastUpdated = QDateTime::currentDateTime();
+    class RuntimeStatsWidget *runtimeStatsWidget = nullptr;
+    std::atomic<qint64> lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
     DataViewHtmlGenerator dataViewHtmlGenerator_;
 
-    // shortcuts
     QList<QShortcut*> hiddenMenuShortcuts;
 
-    QStringList remoteRouteProfiles;
-    QMutex mu_remoteRouteProfiles;
-
-    // search
-    bool searchEnabled = false;
     QString addressFilterString;
     QString nameFilterString;
     QString typeFilterString;
     QString countryFilterString;
 
-    // log
+    QTimer *m_filterRefreshDebounce = nullptr;
+
+    bool m_profilesTableHadFocus = false;
+    int m_profilesScrollValue = 0;
+
     QStringList includeKeywords;
     QStringList excludeKeywords;
     QRegularExpression includeCombined;
@@ -266,10 +314,10 @@ private:
     QWaitCondition logWaiter;
     Qv2ray::ui::SyntaxHighlighter *logHighlighter = nullptr;
 
-    // Immutable snapshot of the log filter fields. The log thread copies these
-    // under logMutex (Qt containers are copy-on-write, so it's O(1)) and then
-    // filters without holding the lock, so producers calling append_log() are
-    // never blocked on the regex/keyword work.
+    QMutex logPendingMutex;
+    QString logPendingText;
+    bool logFlushScheduled = false;
+
     struct LogFilter {
         bool enableInclude = false;
         bool enableExclude = false;
@@ -283,15 +331,16 @@ private:
 
     void log_process_loop();
 
+    // UI thread only.
+    void flush_log_batch();
+
     bool should_print_log(const QString &log, const LogFilter &filter);
 
     void updateLogFilterFields();
 
-    // (Re)installs the log syntax highlighter, deleting any previous one so
-    // highlighters don't stack up (and keep re-highlighting) on theme changes.
     void setLogHighlighter(bool darkMode);
 
-    QList<int> filterProfilesList(const QList<int>& profileIDs);
+    void applyProfileFilters();
 
     QList<int> get_now_selected_list();
     void refresh_startstop_button();
@@ -302,7 +351,11 @@ private:
 
     void saveProfileFocusState();
 
-    void restoreProfileFocusState();
+    void restoreProfileFocusState(RefreshAnchor anchor);
+
+    void selectProfileRows(const QList<int> &rows);
+
+    void focusProfilesTable(bool selectFirst);
 
     void clearUnavailableProfiles(bool confirm = true, QList<int> profileIDs = {});
 
@@ -310,17 +363,15 @@ private:
 
     void handle_deeplink_impl(const QString &url);
 
-    void handle_addsub(const QString &url, const QString &name, bool autoUpdate);
+    void handle_addsub(const QString &url, const QString &name);
 
     void handle_import_route(const QString &url);
 
-    // throne://remoteRoute?data=<...> : add one or more remote routing profiles. The data is
-    // (base64 of) a JSON array of {url, auto_update[, name]} objects.
     void handle_add_remote_routes(const QString &url);
 
-    // Routes user-supplied text: throne:// links go to the deeplink handler, the
-    // rest to the subscription/profile importer.
     void import_or_handle_deeplink(const QString &text);
+
+    void import_text(const QString &text);
 
     void refresh_proxy_list_column_size();
 
@@ -329,6 +380,10 @@ private:
     void refresh_proxy_list_impl_refresh_data(const QList<int>& ids = {}, bool mayNeedReset = false);
 
     void parseQrImage(const QPixmap *image);
+
+    void importFromFiles(const QStringList &paths);
+
+    void trayClickEvent();
 
     void keyPressEvent(QKeyEvent *event) override;
 
@@ -342,10 +397,6 @@ private:
 
     void resizeEvent(QResizeEvent *event) override;
 
-    // Tell the connection lister whether its tab is actually on screen (stats tab
-    // selected, window neither minimized nor hidden to tray) so it can drop to a
-    // relaxed poll cadence when nobody is looking. Recomputed on tab/visibility
-    // changes.
     void syncConnectionViewState();
 
     void dragEnterEvent(QDragEnterEvent *event);
@@ -354,38 +405,20 @@ private:
 
     void applyLogBrowserFont();
 
-    // Debounced refresh_proxy_list trigger for font/theme/resize events.
+    void applyTopBarMetrics();
+    bool usesTightLabels() const;
+
+    QSize designMinimumSize;
+
     QTimer *m_proxyListRefreshDebounce = nullptr;
     void scheduleProxyListRefresh();
 
     bool m_adjustingColumns = false;
 
-    // Watches the physical default-route interface while a profile with a static
-    // egress bind is running. Rebuilds promptly when the bound link goes down or
-    // a same-name PPP/RAS interface is replaced, and slowly when the preferred
-    // default route moves to another still-up interface. Inactive while
-    // m_boundEgressInterface is empty.
-    QTimer *m_defaultInterfaceWatch = nullptr;
-    QString m_boundEgressInterface;
-    QString m_boundEgressFingerprint;
-    int m_ifcDownStreak = 0;   // consecutive watch ticks the bound egress looked down (fast rebind)
-    int m_ifcMovedStreak = 0;  // consecutive ticks the default moved off a still-up bound egress (slow rebind)
-    void checkDefaultInterfaceChange();
-
-    //
-
     void HotkeyEvent(const QString &key);
 
     void RegisterHiddenMenuShortcuts(bool unregister = false);
-    // Register a QShortcut for every action in `menu` (recursing into submenus),
-    // appending them to hiddenMenuShortcuts. Needed because the menubar is hidden,
-    // so actions reachable only through popup menus get no shortcut on their own.
-    // `claimed` holds the key sequences already handled (either by Qt automatically
-    // or by an earlier call); shortcuts already in it are skipped to avoid the
-    // ambiguous-shortcut conflict that breaks actions shared with other menus.
     void registerMenuShortcuts(QMenu *menu, QSet<QKeySequence> &claimed);
-    // Collect the shortcut key sequences of every action in `menu` (recursing into
-    // submenus) into `out`, without registering anything.
     void collectMenuShortcuts(QMenu *menu, QSet<QKeySequence> &out);
 
     void setActionsData();
@@ -394,47 +427,111 @@ private:
 
     void loadShortcuts();
 
-    // rpc
-
     void setup_rpc(QLocalSocket *socket);
 
     bool verify_core_pid(QLocalSocket *socket);
 
-    void urltest_current_group(const QList<int>& profileIDs);
+    void rank_auto_selector(const std::shared_ptr<Configs::Profile>& ent, const QList<int>& stale = {});
 
-    void iptest_current_group(const QList<int>& profileIDs);
+    void on_auto_selector_exhausted(int profileID);
 
-    void stopTests();
+    void on_subscription_group_changed(int gid, const QList<int>& disturbed);
 
-    void runURLTest(const QString& config, const QString& xrayConfig, bool useDefault, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
+    bool auto_selector_ranked = false;
 
-    void runIPTest(const QString& config, const QString& xrayConfig, bool useDefault, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
+    bool handleXrayGeoAssetError(const QString& error, const QString& contextName);
 
     void url_test_current();
 
-    void speedtest_current_group(const QList<int>& profileIDs, bool testCurrent = false);
+    static std::shared_ptr<Configs::Profile> vpn_exit_endpoint(const std::shared_ptr<Configs::Profile> &ent);
 
-    void runSpeedTest(const QString& config, const QString& xrayConfig, bool useDefault, bool testCurrent, const QStringList& outboundTags, const QMap<QString, int>& tag2entID, int entID = -1);
+    static QString vpn_state_text(const QString &state, const QString &error);
+
+    void start_vpn_challenge_poll();
+
+    void stop_vpn_challenge_poll();
+
+    void poll_vpn_challenges();
+
+    void show_vpn_challenge(const VpnAuthChallenge &challenge);
+
+    // True once the challenge is either submitted or deliberately held back for a fresher code.
+    bool auto_answer_vpn_challenge(const VpnAuthChallenge &challenge);
+
+    void submit_vpn_challenge_answer(const VpnAuthChallenge &challenge, const QString &username,
+                                     const QString &password, const QString &secret,
+                                     const QMap<QString, QString> &formValues);
+
+    void show_vpn_auth_failure(const QString &endpointTag, const QString &error);
+
+    bool auto_restart_for_vpn_auth(const QString &endpointTag, int profileID);
+
+    void update_vpn_endpoint_states(const QList<VpnEndpointState> &states);
+
+    void reset_vpn_endpoint_tracking();
+
+    void clear_vpn_credential_overrides();
+
+    QTimer *m_vpnChallengeTimer = nullptr;
+    std::atomic<bool> m_vpnChallengeBusy{false};
+    QSet<QString> m_vpnChallengeSeen;
+    QPointer<DialogVpnAuth> m_vpnAuthDialog;
+    QString m_vpnEndpointState;
+    QString m_vpnTroubleSummary;
+    QString m_vpnTroubleDetail;
+    QHash<QString, QString> m_vpnEndpointLastState;
+    QHash<QString, QString> m_vpnOtpLastCode;
+    QHash<QString, int> m_vpnOtpRejects;
+    QSet<QString> m_vpnChallengeAnswering;
+    QHash<int, int> m_vpnAutoRestarts;
+    qint64 m_vpnAutoRestartAt = 0;
+    // Survives the restart the recovery itself triggers, so a rejected retry cannot loop.
+    QHash<int, int> m_vpnAuthPrompted;
+    int m_vpnAuthRestartID = -1;
 
     bool set_system_dns(bool set, bool save_set = true);
 
     void CheckUpdate();
 
+    void OpenDashboard();
+
+    void SeedDashboard();
+
     void setupConnectionList();
 
     void setupConnectionSortMenu();
 
-    void querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent);
+    void onConnectionContextMenu(const QPoint &pos);
 
-    // Credit the delta between a test's cumulative bytes (curUp/curDown) and the
-    // last reported values for `tag`. Feeds the time-series stats (the tested
-    // config + a synthetic "Speedtest" app) and the legacy per-profile total.
-    // Speed tests bypass the clash tracker, so the looper never sees these bytes;
-    // this is the only place they are counted, for both a selected-profile test
-    // and a current-instance test.
-    void creditSpeedtestTraffic(const std::shared_ptr<Configs::Profile>& profile, const QString& tag, qint64 curUp, qint64 curDown);
+    QString routeRuleAppendBlocker() const;
 
-    void queryCountryTest(const QMap<QString, int>& tag2entID, bool testCurrent);
+    bool addRuleToCurrentRoute(const QString &rawRule, Configs::simpleAction action);
+
+    void setupConnectionFilter();
+
+    void restoreConnectionSort();
+
+    void applyConnectionSort(Stats::ConnectionSort sort);
+
+    void applyConnectionFilters();
+
+    void syncConnectionSourceColumn();
+
+    void syncConnectionExpansion();
+
+    void setConnectionGroupsExpanded(bool expanded);
+
+    bool connectionGroupsExpanded() const;
+
+    void syncConnectionExpandButton();
+
+    void closeConnections(const QStringList &ids);
+
+    QStringList listedConnectionIds() const;
+
+    void refreshConnectionIcons();
+
+    friend class TestRunner;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -443,15 +540,12 @@ protected:
 };
 
 inline MainWindow *GetMainWindow() {
-    return (MainWindow *) mainwindow;
+    return qobject_cast<MainWindow *>(mainwindow);
 }
 
 void UI_InitMainWindow();
 
 #ifdef Q_OS_LINUX
-/*
- * Proxy class for interface org.freedesktop.portal.Request
- */
 class OrgFreedesktopPortalRequestInterface : public QDBusAbstractInterface
 {
     Q_OBJECT
@@ -470,7 +564,7 @@ public Q_SLOTS:
         return asyncCallWithArgumentList(QStringLiteral("Close"), argumentList);
     }
 
-Q_SIGNALS: // SIGNALS
+Q_SIGNALS:
     void Response(uint response, QVariantMap results);
 };
 

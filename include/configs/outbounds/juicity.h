@@ -28,7 +28,6 @@ namespace Configs
             return tls;
         }
 
-        // baseConfig overrides
         bool ParseFromLink(const QString& link) override;
         bool ParseFromJson(const QJsonObject& object) override;
         QString ExportToLink() override;
@@ -36,5 +35,6 @@ namespace Configs
         BuildResult Build() override;
 
         QString DisplayType() override;
+        SecurityInfo GetSecurity() override;
     };
 }

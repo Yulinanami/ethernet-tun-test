@@ -29,6 +29,7 @@ public slots:
 private slots:
     void on_certificate_edit_clicked();
     void on_xray_downloadsettings_edit_clicked();
+    void on_xray_finalmask_edit_clicked();
 private:
     Ui::DialogEditProfile *ui;
 
@@ -36,6 +37,8 @@ private:
 
     QWidget *innerWidget{};
     ProfileEditor *innerEditor{};
+    QList<QWidget *> outerTabOrder;
+    qsizetype innerTabOrderIndex{-1};
 
     QString type;
     int groupId;
@@ -47,11 +50,14 @@ private:
     struct {
         QStringList certificate;
         QString XrayDownloadSettings;
+        QJsonObject XrayFinalmask;
     } CACHE;
 
     void typeSelected(const QString &newType);
 
     void updateXrayCommons(QString network);
+
+    void updateTlsControlsEnabled();
 
     void setupXrayXHTTPControls();
 
